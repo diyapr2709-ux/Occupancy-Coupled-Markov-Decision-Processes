@@ -1,0 +1,65 @@
+"""Non-learning comparators: fixed guideline, cycling, and stationary (incl. uniform) mixing.
+
+All of them pass through the C5 filter when the environment supplies a feasibility mask,
+so they are compared with the learned policy under the same clinical constraints.
+"""
+
+import numpy as np
+
+from ocmdp.components.constraint_filter import sample_feasible
+
+
+class HeuristicPolicy:
+    name = "heuristic"
+
+    def reset(self) -> None:
+        pass
+
+    def probs(self, obs: np.ndarray, info: dict) -> np.ndarray:
+        raise NotImplementedError
+
+    def act(self, obs: np.ndarray, info: dict, rng: np.random.Generator) -> int:
+        p = self.probs(obs, info)
+        return sample_feasible(p, info.get("action_mask", np.ones(len(p), dtype=bool)), rng)
+
+
+class FixedGuideline(HeuristicPolicy):
+    """Current practice: one first-line drug, unchanged over the horizon."""
+
+    def __init__(self, n_drugs: int, drug: int = 0):
+        self.name = f"fixed[{drug}]"
+        self._p = np.eye(n_drugs)[drug]
+
+    def probs(self, obs, info):
+        return self._p
+
+
+class Cycling(HeuristicPolicy):
+    """Rotate the first-line drug every `period` quarters: deterministic but non-stationary."""
+
+    def __init__(self, n_drugs: int, period: int = 4, drugs: tuple[int, ...] | None = None):
+        self.name = f"cycling[{period}q]"
+        self._eye = np.eye(n_drugs)
+        self._drugs = tuple(range(n_drugs)) if drugs is None else drugs
+        self._period = period
+
+    def probs(self, obs, info):
+        return self._eye[self._drugs[(info["quarter"] // self._period) % len(self._drugs)]]
+
+
+class StationaryMixing(HeuristicPolicy):
+    """Blind mixing: the same distribution over drugs in every state."""
+
+    def __init__(self, probs: np.ndarray, name: str | None = None):
+        p = np.asarray(probs, dtype=np.float64)
+        if np.any(p < 0) or not np.isclose(p.sum(), 1.0):
+            raise ValueError("probs must be a distribution")
+        self._p = p / p.sum()
+        self.name = name or "mixing[" + ",".join(f"{x:.2g}" for x in self._p) + "]"
+
+    def probs(self, obs, info):
+        return self._p
+
+
+def uniform_mixing(n_drugs: int) -> StationaryMixing:
+    return StationaryMixing(np.full(n_drugs, 1.0 / n_drugs), name="uniform")
