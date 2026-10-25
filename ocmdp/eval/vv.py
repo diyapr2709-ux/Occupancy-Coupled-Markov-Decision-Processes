@@ -12,17 +12,20 @@ oracle's degradation when its occupancy memory lam is misspecified.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import gymnasium as gym
 import numpy as np
 import torch
 
+from ocmdp.agents.distill import HeadPolicy, collect, dagger, distill
 from ocmdp.baselines.heuristics import Cycling, FixedGuideline, HeuristicPolicy, StationaryMixing, uniform_mixing
-from ocmdp.baselines.oracle import FullInformationOracle
+from ocmdp.baselines.oracle import FullInformationOracle, tuned_cycling
 from ocmdp.components.constraint_filter import sample_feasible
+from ocmdp.components.policy_head import MixingPolicyHead
 from ocmdp.core.occupancy import OccupancyMeasure, scale_effective_horizon
 from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
+from ocmdp.envs.wrappers import MechanismObservation
 from ocmdp.eval.metrics import expected_failure_rate, summarize
 from ocmdp.eval.rollout import rollout
 from ocmdp.eval.seeds import eval_seed
@@ -36,18 +39,27 @@ FIXATION_THRESHOLD = 0.6
 EFFICACY_THRESHOLD = 0.6
 
 
+STATUSES = ("pass", "fail", "pending")
+
+
 @dataclass
 class CheckResult:
     name: str
-    status: str  # "pass" | "fail" | "pending"
+    status: str  # one of STATUSES
     detail: str
     values: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.status not in STATUSES:
+            raise ValueError(f"status must be one of {STATUSES}, got {self.status!r}")
 
 
 VERIFICATION: dict[str, Callable[[], CheckResult]] = {}
 
 
 def verification(fn: Callable[[], CheckResult]) -> Callable[[], CheckResult]:
+    if fn.__name__ in VERIFICATION:
+        raise ValueError(f"a verification check named {fn.__name__!r} is already registered")
     VERIFICATION[fn.__name__] = fn
     return fn
 
@@ -59,7 +71,17 @@ def _within(name: str, error: float, tol: float, detail: str, **values) -> Check
 
 
 def run_verification() -> list[CheckResult]:
-    return [check() for check in VERIFICATION.values()]
+    """Run every check. A check that raises is recorded as a failure instead of aborting the rest."""
+    results = []
+    for name, check in VERIFICATION.items():
+        try:
+            result = check()
+        except Exception as exc:  # noqa: BLE001  any crash in a check is a verification failure
+            result = CheckResult(name, "fail", f"raised {type(exc).__name__}: {exc}")
+        if not isinstance(result, CheckResult):
+            result = CheckResult(name, "fail", f"returned {type(result).__name__}, not a CheckResult")
+        results.append(result)
+    return results
 
 
 @verification
@@ -173,9 +195,9 @@ def oracle_plan_dominates_heuristic_schedules() -> CheckResult:
     rows = {}
     for name, cfg in (("TwoDrug", ToyConfig.two_drug()), ("PairedDrugs", ToyConfig.paired())):
         env = ToyOCMDPEnv(cfg)
-        env.reset(seed=0)
+        obs, info = env.reset(seed=0)
         oracle = FullInformationOracle(env)
-        oracle.probs(None, {"quarter": 0})
+        oracle.probs(obs, info)
         model = MeanFieldModel(cfg)
         quarters = np.arange(cfg.horizon_quarters)
         values = []
@@ -193,16 +215,29 @@ def oracle_plan_dominates_heuristic_schedules() -> CheckResult:
 
 
 def comparators(env: gym.Env) -> list[HeuristicPolicy]:
-    """Table 1 comparators that exist so far, for a toy environment. The oracle is always last."""
+    """Table 1 comparators that exist so far, for a toy environment. The oracle is always last.
+
+    Within-class and cross-class mixing are added only when the cross-resistance matrix
+    has classes of drugs with identical rows to mix within and across.
+    """
     n = env.action_space.n
     policies: list[HeuristicPolicy] = [FixedGuideline(n, 0)]
-    if n == 4:
-        policies += [
-            StationaryMixing([0.5, 0.5, 0.0, 0.0], name="within-class"),
-            StationaryMixing([0.5, 0.0, 0.5, 0.0], name="cross-class"),
-        ]
-    policies += [Cycling(n, period=4), uniform_mixing(n), FullInformationOracle(env)]
+    classes = _identical_row_classes(env.unwrapped.coupling.matrix)
+    multi = [c for c in classes if len(c) >= 2]
+    if multi and len(classes) >= 2:
+        within, across = np.zeros(n), np.zeros(n)
+        within[list(multi[0][:2])] = 0.5
+        across[[c[0] for c in classes[:2]]] = 0.5
+        policies += [StationaryMixing(within, name="within-class"), StationaryMixing(across, name="cross-class")]
+    policies += [Cycling(n, period=4), tuned_cycling(env.unwrapped.config), uniform_mixing(n), FullInformationOracle(env)]
     return policies
+
+
+def _identical_row_classes(C: np.ndarray) -> list[tuple[int, ...]]:
+    classes: dict[bytes, list[int]] = {}
+    for drug, row in enumerate(C):
+        classes.setdefault(row.tobytes(), []).append(drug)
+    return [tuple(c) for c in classes.values()]
 
 
 def comparator_table(env: gym.Env, seeds: tuple[int, ...]) -> dict[str, dict[str, dict]]:
@@ -241,16 +276,81 @@ def lambda_misspecification(
     return out
 
 
+def noise_robustness(
+    config: ToyConfig, seeds: tuple[int, ...], noise_levels: tuple[float, ...] = (0.0, 0.05, 0.1, 0.2)
+) -> dict[float, dict[str, dict]]:
+    """Expected failure rate as resistance process noise grows.
+
+    Tuned cycling and the open-loop oracle commit before the episode, using the noise-free
+    model. The closed-loop oracle re-plans every 4 quarters from the state actually
+    reached. Uniform mixing never commits to anything. Every policy sees the same shocks
+    for a given seed, so per-seed differences are paired:
+      replanning_gain    = open-loop - closed-loop oracle: the same planner with and
+                           without feedback, so this isolates what re-planning is worth;
+      gain_over_rotation = tuned cycling - closed-loop oracle: everything the oracle adds
+                           over the best blind rotation (planning and feedback together).
+    """
+    tuned = tuned_cycling(config)
+    out = {}
+    for sigma in noise_levels:
+        env = ToyOCMDPEnv(replace(config, resistance_noise=sigma))
+        policies = [
+            uniform_mixing(env.action_space.n),
+            tuned,
+            FullInformationOracle(env, replan_every=config.horizon_quarters, name="oracle[open-loop]"),
+            FullInformationOracle(env, name="oracle[closed-loop]"),
+        ]
+        rates = {p.name: np.array([expected_failure_rate(rollout(env, p, eval_seed(s))) for s in seeds]) for p in policies}
+        out[sigma] = {name: aggregate(r) for name, r in rates.items()}
+        out[sigma]["replanning_gain"] = aggregate(rates["oracle[open-loop]"] - rates["oracle[closed-loop]"])
+        out[sigma]["gain_over_rotation"] = aggregate(rates[tuned.name] - rates["oracle[closed-loop]"])
+    return out
+
+
+def distillation_study(config: ToyConfig, seeds: tuple[int, ...], dagger_rounds: int = 3) -> dict[str, dict]:
+    """Can C3, seeing only the observation, reproduce the full-information oracle?
+
+    Trained on the oracle's action distributions over the protocol seeds and evaluated on
+    the evaluation seeds. Embeddings are the ground-truth cross-resistance rows (what C2
+    should learn). No reward is used: this checks representational capacity, not RL.
+    """
+    variants = {
+        "C3 cloned, drug obs": (False, 0),
+        "C3 DAgger, drug obs": (False, dagger_rounds),
+        "C3 DAgger, mechanism obs": (True, dagger_rounds),
+    }
+    embeddings = torch.tensor(config.cross_resistance, dtype=torch.float32)
+    out = {}
+    for name, (mechanism_obs, rounds) in variants.items():
+        env = ToyOCMDPEnv(config)
+        env = MechanismObservation(env) if mechanism_obs else env
+        torch.manual_seed(0)
+        head = MixingPolicyHead(env.observation_space.shape[0], embeddings.shape[1])
+        if rounds:
+            student = dagger(env, FullInformationOracle(env), head, embeddings, seeds, rounds=rounds)
+        else:
+            distill(head, embeddings, collect(env, FullInformationOracle(env), seeds))
+            student = HeadPolicy(head, embeddings)
+        out[name] = aggregate([expected_failure_rate(rollout(env, student, eval_seed(s))) for s in seeds])
+    env = ToyOCMDPEnv(config)
+    for reference in (uniform_mixing(env.action_space.n), FullInformationOracle(env)):
+        out[reference.name] = aggregate([expected_failure_rate(rollout(env, reference, eval_seed(s))) for s in seeds])
+    return out
+
+
 def aggregate(values) -> dict:
     """Mean and sample std over the finite values; `never` counts +inf (seeds where no mechanism fixed).
 
     NaN or -inf means a metric is broken, not that an event never happened, so it raises.
+    With one finite value there is no spread to report, so std is None.
     """
     v = np.asarray(values, dtype=float)
+    if v.size == 0:
+        raise ValueError("no values to aggregate")
     if np.isnan(v).any() or np.isneginf(v).any():
         raise ValueError(f"metric values contain NaN or -inf: {v}")
     finite = v[np.isfinite(v)]
     if finite.size == 0:
         return {"mean": None, "std": None, "never": int(v.size)}
-    std = float(finite.std(ddof=1)) if finite.size > 1 else 0.0
+    std = float(finite.std(ddof=1)) if finite.size > 1 else None
     return {"mean": float(finite.mean()), "std": std, "never": int(v.size - finite.size)}

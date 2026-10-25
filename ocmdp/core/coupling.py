@@ -14,7 +14,7 @@ class CrossResistanceCoupling:
         C = np.array(cross_resistance, dtype=np.float64)
         if C.ndim != 2:
             raise ValueError(f"cross_resistance must be a (drugs, mechanisms) matrix, got shape {C.shape}")
-        if np.any(C < 0) or np.any(C > 1):
+        if not np.isfinite(C).all() or np.any(C < 0) or np.any(C > 1):
             raise ValueError("cross-resistance entries must lie in [0, 1]")
         if np.any(C.max(axis=1) == 0):
             raise ValueError("every drug must select for at least one mechanism")

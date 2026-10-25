@@ -27,6 +27,8 @@ class FixedGuideline(HeuristicPolicy):
     """Current practice: one first-line drug, unchanged over the horizon."""
 
     def __init__(self, n_drugs: int, drug: int = 0):
+        if not 0 <= drug < n_drugs:
+            raise ValueError(f"drug {drug} out of range for {n_drugs} drugs")
         self.name = f"fixed[{drug}]"
         self._p = np.eye(n_drugs)[drug]
 
@@ -38,9 +40,11 @@ class Cycling(HeuristicPolicy):
     """Rotate the first-line drug every `period` quarters: deterministic but non-stationary."""
 
     def __init__(self, n_drugs: int, period: int = 4, drugs: tuple[int, ...] | None = None):
+        self._drugs = tuple(range(n_drugs)) if drugs is None else tuple(drugs)
+        if period < 1 or not self._drugs or not all(0 <= d < n_drugs for d in self._drugs):
+            raise ValueError("need period >= 1 and a non-empty rotation of valid drugs")
         self.name = f"cycling[{period}q]"
         self._eye = np.eye(n_drugs)
-        self._drugs = tuple(range(n_drugs)) if drugs is None else drugs
         self._period = period
 
     def probs(self, obs, info):

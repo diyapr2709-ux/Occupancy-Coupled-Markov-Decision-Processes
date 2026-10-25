@@ -33,9 +33,14 @@ def pushforward(probs: torch.Tensor, assignment: torch.Tensor) -> torch.Tensor:
     return probs @ assignment
 
 
+def _floor(probs: torch.Tensor, eps: float) -> float:
+    # 1e-8 underflows to zero in float16, so never go below the dtype's smallest normal number
+    return max(eps, torch.finfo(probs.dtype).tiny)
+
+
 def categorical_entropy(probs: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     # the clamp keeps the gradient finite where a probability is exactly zero
-    return -(probs * probs.clamp_min(eps).log()).sum(dim=-1)
+    return -(probs * probs.clamp_min(_floor(probs, eps)).log()).sum(dim=-1)
 
 
 def pushforward_entropy(probs: torch.Tensor, assignment: torch.Tensor) -> torch.Tensor:
@@ -44,9 +49,10 @@ def pushforward_entropy(probs: torch.Tensor, assignment: torch.Tensor) -> torch.
 
 def similarity_kernel(embeddings: torch.Tensor, bandwidth: float = 1.0) -> torch.Tensor:
     """(A, d) embeddings -> (A, A) symmetric similarity with unit diagonal."""
-    return torch.exp(-torch.cdist(embeddings, embeddings).pow(2) / bandwidth)
+    # the matrix-multiply path of cdist leaves a nonzero self-distance at large norms
+    return torch.exp(-torch.cdist(embeddings, embeddings, compute_mode="donot_use_mm_for_euclid_dist").pow(2) / bandwidth)
 
 
 def similarity_sensitive_entropy(probs: torch.Tensor, similarity: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """H_Z(pi) for (..., A) probs and an (A, A) similarity with unit diagonal and entries in [0, 1]."""
-    return -(probs * (probs @ similarity.T).clamp_min(eps).log()).sum(dim=-1)
+    return -(probs * (probs @ similarity.T).clamp_min(_floor(probs, eps)).log()).sum(dim=-1)

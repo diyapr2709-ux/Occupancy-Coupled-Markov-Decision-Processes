@@ -17,6 +17,10 @@ class NoFeasibleAction(ValueError):
 def project_probs(probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Zero infeasible actions and renormalise; uniform over the feasible set if the policy put no mass there."""
     probs, mask = np.asarray(probs, dtype=np.float64), np.asarray(mask, dtype=bool)
+    if probs.shape[-1:] != mask.shape[-1:]:
+        raise ValueError(f"probs over {probs.shape[-1:]} drugs but mask over {mask.shape[-1:]}")
+    if not np.isfinite(probs).all() or np.any(probs < 0):
+        raise ValueError("probs must be finite and non-negative")
     if not mask.any(axis=-1).all():
         raise NoFeasibleAction("a patient has no feasible action")
     masked = np.where(mask, probs, 0.0)

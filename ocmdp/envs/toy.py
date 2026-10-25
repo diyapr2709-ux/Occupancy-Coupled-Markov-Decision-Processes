@@ -11,6 +11,12 @@ enters the occupancy measure (visible to the kernel `delay` quarters later), sel
 pressure is recomputed through Phi, and resistance moves one step. The kernel is fixed
 within a quarter, so no single action can influence it.
 
+Noise. With `resistance_noise` > 0, resistance also takes a drift shock each quarter,
+scaled by sqrt(r (1 - r)) as in Wright-Fisher sampling of carriers, so it is zero at
+r = 0 and r = 1. The mean-field model (ocmdp.theory.mean_field) is the noise-free
+skeleton, so with noise on, a plan made from it goes stale and has to be refreshed from
+the state actually reached.
+
 Observation: resistance frequency per mechanism, then the occupancy measure. With
 `markov_observation` it also carries the rest of the Markov state:
   - the fraction of the horizon elapsed (the horizon is finite);
@@ -36,6 +42,8 @@ PerMechanism = float | tuple[float, ...]
 def per_mechanism(value: PerMechanism, n_mechanisms: int) -> np.ndarray:
     """Broadcast a scalar, or check a per-mechanism tuple, to shape (M,)."""
     arr = np.asarray(value, dtype=np.float64)
+    if not np.isfinite(arr).all():
+        raise ValueError(f"per-mechanism values must be finite, got {value!r}")
     if arr.ndim == 0:
         return np.full(n_mechanisms, float(arr))
     if arr.shape != (n_mechanisms,):
@@ -57,6 +65,7 @@ class ToyConfig:
     contraindication_rate: float = 0.0  # per drug per patient; at least one drug always stays feasible
     expected_reward: bool = False  # reward -P(fail) instead of a sampled failure
     markov_observation: bool = False
+    resistance_noise: float = 0.0  # drift: sd of the per-quarter shock is resistance_noise * sqrt(r (1 - r))
 
     @classmethod
     def two_drug(cls, rho: float = 0.0, **kwargs) -> "ToyConfig":
@@ -78,10 +87,14 @@ class ToyOCMDPEnv(gym.Env):
 
     def __init__(self, config: ToyConfig | None = None):
         self.config = cfg = config or ToyConfig()
-        if cfg.decisions_per_quarter < 1 or cfg.horizon_quarters < 1:
-            raise ValueError("decisions_per_quarter and horizon_quarters must be positive")
+        for name in ("decisions_per_quarter", "horizon_quarters"):
+            value = getattr(cfg, name)
+            if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
         if not 0.0 <= cfg.contraindication_rate < 1.0:
             raise ValueError("contraindication_rate must lie in [0, 1)")
+        if not 0.0 <= cfg.resistance_noise < np.inf:  # also rejects NaN
+            raise ValueError(f"resistance_noise must be finite and non-negative, got {cfg.resistance_noise}")
         self.coupling = CrossResistanceCoupling(cfg.cross_resistance)
         n_drugs, n_mech = self.coupling.n_drugs, self.coupling.n_mechanisms
         self.kappa = per_mechanism(cfg.kappa, n_mech)
@@ -94,6 +107,7 @@ class ToyOCMDPEnv(gym.Env):
         self.action_space = spaces.Discrete(n_drugs)
         obs_dim = n_mech + n_drugs + (1 + n_drugs * (1 + cfg.delay) if cfg.markov_observation else 0)
         self.observation_space = spaces.Box(0.0, 1.0, shape=(obs_dim,), dtype=np.float32)
+        self._episode_over = True  # until the first reset
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
@@ -104,12 +118,16 @@ class ToyOCMDPEnv(gym.Env):
         self._quarter = 0
         self._decision = 0
         self._mask = self._sample_mask()
+        self._episode_over = False
         return self._obs(), self._info()
 
     def step(self, action):
-        a = int(action)
-        if not self.action_space.contains(a):
+        if self._episode_over:
+            raise RuntimeError("call reset() before step(): no episode in progress")
+        # checked before int(), which would truncate 1.5 to 1; Discrete.contains would accept True as drug 1
+        if isinstance(action, (bool, np.bool_)) or not self.action_space.contains(action):
             raise ValueError(f"invalid action {action!r}")
+        a = int(action)
         fail_prob = float(self._fail_prob[a])
         failed = bool(self.np_random.random() < fail_prob)
         reward = -fail_prob if self.config.expected_reward else -float(failed)
@@ -120,6 +138,7 @@ class ToyOCMDPEnv(gym.Env):
         if self._decision == self.config.decisions_per_quarter:
             self._close_quarter()
         truncated = self._quarter >= self.config.horizon_quarters
+        self._episode_over = truncated
 
         self._mask = self._sample_mask()
         info = self._info()
@@ -128,6 +147,8 @@ class ToyOCMDPEnv(gym.Env):
 
     def state(self) -> dict:
         """Full simulator state. Privileged: for the full-information oracle and for verification, not agents."""
+        if not hasattr(self, "_r"):
+            raise RuntimeError("call reset() before state(): the environment has no state yet")
         return {
             "resistance": self._r.copy(),
             "occupancy": self.occupancy.value,
@@ -141,6 +162,10 @@ class ToyOCMDPEnv(gym.Env):
     def _close_quarter(self) -> None:
         mu = self.occupancy.update(self._counts / self._counts.sum())
         self._r = resistance_step(self._r, self.coupling(mu), self.kappa, self.delta)
+        if self.config.resistance_noise > 0:  # draws only when on, so noise-free seeds are unchanged
+            shock = self.np_random.standard_normal(self.coupling.n_mechanisms)
+            scale = np.sqrt(np.clip(self._r * (1.0 - self._r), 0.0, None))
+            self._r = np.clip(self._r + self.config.resistance_noise * scale * shock, 0.0, 1.0)
         self._fail_prob = failure_probability(self._r, self.coupling.matrix)
         self._counts[:] = 0
         self._decision = 0

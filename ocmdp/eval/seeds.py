@@ -21,7 +21,8 @@ def seed_everything(seed: int) -> None:
 
 
 def policy_rng(seed: int) -> np.random.Generator:
-    return np.random.default_rng([seed, 1])
+    # a spawn key no plain integer seed can produce; default_rng([seed, 1]) equals the stream of seed + 2**32
+    return np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(1,)))
 
 
 def eval_seed(seed: int) -> int:

@@ -18,6 +18,8 @@ def expected_failure_rate(log: EpisodeLog) -> float:
 
 def time_to_fixation(resistance: np.ndarray, threshold: float) -> np.ndarray:
     """(Q, M) frequencies -> (M,) first quarter each mechanism reaches threshold; inf if never."""
+    if np.isnan(resistance).any():
+        raise ValueError("resistance contains NaN")
     reached = resistance >= threshold
     return np.where(reached.any(axis=0), reached.argmax(axis=0), np.inf)
 

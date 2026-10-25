@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ocmdp.core.coupling import CrossResistanceCoupling
-from ocmdp.core.selection import failure_probability, stationary_resistance
+from ocmdp.core.selection import check_rates, failure_probability, stationary_resistance
 
 
 def stationary_failure_rate(policy: np.ndarray, coupling: CrossResistanceCoupling, kappa, delta) -> np.ndarray:
@@ -43,6 +43,9 @@ class TwoDrugSolution:
 
 
 def solve_two_drug(rho: float = 0.0, kappa: float = 0.10, delta: float = 0.05, resolution: int = 10_001) -> TwoDrugSolution:
+    check_rates(kappa, delta)
+    if resolution < 2:
+        raise ValueError(f"resolution must be at least 2, got {resolution}")
     coupling = CrossResistanceCoupling(((1.0, rho), (rho, 1.0)))
     ps = np.linspace(0.0, 1.0, resolution)
     f = stationary_failure_rate(np.stack([ps, 1.0 - ps], axis=-1), coupling, kappa, delta)

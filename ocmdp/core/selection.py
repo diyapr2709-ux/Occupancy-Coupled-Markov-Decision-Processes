@@ -20,7 +20,9 @@ import numpy as np
 
 def check_rates(kappa, delta) -> None:
     """kappa + delta <= 1 keeps every frequency in [0, 1] under resistance_step."""
-    kappa, delta = np.asarray(kappa), np.asarray(delta)
+    kappa, delta = np.asarray(kappa, dtype=np.float64), np.asarray(delta, dtype=np.float64)
+    if not (np.isfinite(kappa).all() and np.isfinite(delta).all()):
+        raise ValueError("kappa and delta must be finite")
     if np.any(kappa < 0) or np.any(delta <= 0):
         raise ValueError("need kappa >= 0 and delta > 0")
     if np.any(kappa + delta > 1):

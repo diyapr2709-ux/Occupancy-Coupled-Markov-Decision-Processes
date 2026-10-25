@@ -28,25 +28,28 @@ Extras: `graph` (PyTorch Geometric, for C2), `train` (tyro, W&B, TensorBoard, fo
 | `ocmdp/core/occupancy.py` | Occupancy measure `mu_t` with decay `lam` and delay | Diya | done |
 | `ocmdp/core/coupling.py` | `Phi`: occupancy → selection pressure via cross-resistance | Nikhila | done |
 | `ocmdp/core/selection.py` | Linear selection model (toy dynamics) | Nikhila | done |
-| `ocmdp/envs/toy.py` | Reduced OC-MDP, Gymnasium API; `TwoDrug-v0`, `PairedDrugs-v0`; per-mechanism rates, `mu0`, opt-in Markov observation, privileged `state()` | Nikhila | done |
+| `ocmdp/envs/toy.py` | Reduced OC-MDP, Gymnasium API; `TwoDrug-v0`, `PairedDrugs-v0`; per-mechanism rates, `mu0`, opt-in Markov observation, Wright–Fisher process noise, privileged `state()` | Nikhila | done |
+| `ocmdp/envs/wrappers.py` | `MechanismObservation`: observe prescribing as selection pressure `x @ C` | Diya | done |
 | `ocmdp/envs/stewardship.py` | Full env: fitness landscape + ward ABM + antibiogram | Nikhila | stub |
 | `ocmdp/envs/{evolution,transmission,observation}.py` | Its three layers | Nikhila | stub |
 | `ocmdp/components/belief_filter.py` | C1 population belief filter | Nikhila | stub |
 | `ocmdp/components/action_encoder.py` | C2 graph encoder `psi` | Soumitra | stub |
-| `ocmdp/components/policy_head.py` | C3 mixing policy head, `alpha(s)` | Diya | stub |
-| `ocmdp/components/reserve_critic.py` | C4 efficacy-reserve critic | Diya | stub |
+| `ocmdp/components/pairwise.py` | Shared pairwise (state, embedded drug) scorer for C3 and C4 | Diya | done |
+| `ocmdp/components/policy_head.py` | C3 mixing policy head, `alpha(s)` | Diya | done |
+| `ocmdp/components/reserve_critic.py` | C4 efficacy-reserve critic, reserve cost and TD target | Diya | done (not yet trained) |
 | `ocmdp/components/constraint_filter.py` | C5 per-patient hard feasibility projection | Nikhila | done |
 | `ocmdp/objectives/pushforward_entropy.py` | `H(psi#pi)`: cluster form, and cluster-free similarity-sensitive form `H_Z` | Diya | done |
 | `ocmdp/agents/losses.py` | Actor loss, `alpha(s)` loss, entropy target | Diya | done |
 | `ocmdp/agents/lagrangian.py` | Dual variable `xi`, slow-clock projected ascent | Diya | done |
+| `ocmdp/agents/distill.py` | Behaviour cloning and DAgger from the oracle into C3 | Diya | done |
 | `ocmdp/agents/oc_sac.py` | CleanRL `sac_atari.py` fork, training loop | Diya | stub (args only) |
 | `ocmdp/theory/two_drug.py` | Mean-field two-drug result, suboptimality gap vs `rho` | Soumitra | done |
 | `ocmdp/theory/mean_field.py` | Differentiable mean-field model of the toy env (exact replay of env trajectories) | Soumitra | done |
 | `ocmdp/baselines/heuristics.py` | Fixed guideline, cycling, stationary / uniform mixing | Soumitra | done |
-| `ocmdp/baselines/oracle.py` | Full-information oracle: replanning on the mean-field model; runs under misspecified `lam` | Soumitra | done |
+| `ocmdp/baselines/oracle.py` | Full-information oracle: replanning on the mean-field model; runs under misspecified `lam`. Tuned cycling (best blind rotation) | Soumitra | done |
 | `ocmdp/baselines/{deep_rl,sw_ucb,offline}.py` | PPO/DQN/SAC, SW-UCB, CQL/IQL | Soumitra | stub |
 | `ocmdp/eval/` | Rollout logging, Section 5 metrics, fixed seed protocol | Soumitra | done |
-| `ocmdp/eval/vv.py`, `experiments/validate.py` | V&V harness: verification registry, comparator table with regret, `lam` misspecification | Soumitra | done |
+| `ocmdp/eval/vv.py`, `experiments/validate.py` | V&V harness: verification registry, comparator table with regret, `lam` misspecification, noise robustness, C3 distillation | Soumitra | done |
 | `ocmdp/transfer/safety_filter.py` | Safety filters vs adapting attack populations | Diya | stub |
 | `docs/cleanrl_diff.md` | Documented diff against CleanRL | Diya | outline |
 | `data/` | Fitness landscape data | Nikhila | empty |
@@ -68,6 +71,17 @@ The full environment must keep this contract, so every comparator runs unmodifie
 - **Validation** produces measurements, not verdicts: the comparator table, regret against the oracle, and degradation under `lam` misspecification.
 
 `experiments/validate.py` runs both, prints them, and writes a JSON report to `runs/vv/`. It exits non-zero if any verification check fails.
+
+Three more test layers sit beside the harness:
+
+- **System tests** (`tests/test_system.py`) run the whole stack end to end:
+  - property-based fuzzing over random valid configs, with invariants checked at every step and exact mean-field replay;
+  - rejection of invalid input across the public API;
+  - sync and async vector environments;
+  - determinism, deepcopy and pickling;
+  - a 20-drug run at the proposal's scale;
+  - the CLI.
+- **Penetration regressions** (`tests/test_pentest_regressions.py`) pin every confirmed finding from the adversarial review, numbered as in its report.
 
 Use `expected_failure_rate` to compare policies. It is the mean failure probability of the drugs actually given. It has the same expectation as the sampled `failure_rate` without the patient-outcome noise.
 

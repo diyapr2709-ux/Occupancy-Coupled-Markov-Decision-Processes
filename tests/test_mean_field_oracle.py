@@ -88,9 +88,9 @@ def test_oracle_beats_cycling_and_uniform_in_expectation():
 
 
 class _RecordingOracle(FullInformationOracle):
-    def _replan(self, quarter):
+    def _replan(self, quarter, info):
         self.replanned_at.append(quarter)
-        super()._replan(quarter)
+        super()._replan(quarter, info)
 
     def reset(self):
         super().reset()

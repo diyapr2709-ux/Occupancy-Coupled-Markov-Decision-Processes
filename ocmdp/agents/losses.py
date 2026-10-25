@@ -16,6 +16,12 @@ does not commit to one.
 import torch
 
 
+def _require_shape(shape: torch.Size, **tensors: torch.Tensor) -> None:
+    for name, t in tensors.items():
+        if t.shape != shape:
+            raise ValueError(f"{name} has shape {tuple(t.shape)}, expected {tuple(shape)}")
+
+
 def actor_loss(
     probs: torch.Tensor,
     q_values: torch.Tensor,
@@ -32,10 +38,9 @@ def actor_loss(
     xi:        dual variable; treated as a constant here
     entropy:   (B,) H(psi#pi), computed from `probs` so that it carries their gradient
     """
-    batch = probs.shape[:-1]
-    if entropy.shape != batch or alpha.shape != batch:
-        # a (B, 1) entropy or alpha would silently broadcast against (B,) into a (B, B) loss
-        raise ValueError(f"entropy {tuple(entropy.shape)} and alpha {tuple(alpha.shape)} must have shape {tuple(batch)}")
+    # a (B, 1) input would silently broadcast against (B,) into a (B, B) loss
+    _require_shape(probs.shape, q_values=q_values, reserve_q=reserve_q)
+    _require_shape(probs.shape[:-1], entropy=entropy, alpha=alpha)
     expected_q = (probs * q_values).sum(-1)
     expected_reserve = (probs * reserve_q).sum(-1)
     return (-(expected_q + alpha.detach() * entropy) + xi * expected_reserve).mean()
@@ -43,6 +48,7 @@ def actor_loss(
 
 def temperature_loss(log_alpha: torch.Tensor, entropy: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Raises alpha(s) where H(psi#pi) is below its state-dependent target and lowers it where above."""
+    _require_shape(log_alpha.shape, entropy=entropy, target=target)
     return (log_alpha * (entropy - target).detach()).mean()
 
 
