@@ -16,6 +16,18 @@ from collections import deque
 import numpy as np
 
 
+def scale_effective_horizon(lam: float, factor: float) -> float:
+    """The lam' whose effective horizon 1 / (1 - lam') is `factor` times that of lam.
+
+    Misspecification of lam is stated on the horizon, since lam itself cannot be doubled
+    past one: factor 2 with lam = 0.8 gives 0.9, factor 1/2 gives 0.6.
+    """
+    scaled = 1.0 - (1.0 - lam) / factor
+    if not 0.0 <= scaled < 1.0:
+        raise ValueError(f"factor {factor} takes lam = {lam} outside [0, 1)")
+    return scaled
+
+
 class OccupancyMeasure:
     def __init__(self, n_actions: int, lam: float, delay: int = 0, init: np.ndarray | None = None):
         if n_actions < 1:
@@ -45,6 +57,11 @@ class OccupancyMeasure:
     @property
     def value(self) -> np.ndarray:
         return self._mu.copy()
+
+    @property
+    def pending(self) -> list[np.ndarray]:
+        """Distributions recorded but not yet visible to the kernel, oldest first."""
+        return [d.copy() for d in self._pending]
 
     @property
     def effective_horizon(self) -> float:

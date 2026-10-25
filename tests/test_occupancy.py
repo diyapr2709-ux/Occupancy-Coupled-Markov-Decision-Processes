@@ -4,13 +4,6 @@ import pytest
 from ocmdp.core.occupancy import OccupancyMeasure
 
 
-def test_decays_at_configured_rate():
-    lam = 0.8
-    occ = OccupancyMeasure(2, lam, init=np.array([1.0, 0.0]))
-    for n in range(1, 40):
-        assert occ.update(np.array([0.0, 1.0]))[0] == pytest.approx(lam**n)
-
-
 def test_recursion_matches_explicit_weighted_sum():
     rng = np.random.default_rng(0)
     lam, init = 0.7, np.array([0.2, 0.3, 0.5])

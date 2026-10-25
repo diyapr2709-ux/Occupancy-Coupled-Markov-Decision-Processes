@@ -2,7 +2,13 @@ import math
 
 import torch
 
-from ocmdp.objectives.pushforward_entropy import categorical_entropy, pushforward_entropy, soft_assignment
+from ocmdp.objectives.pushforward_entropy import (
+    categorical_entropy,
+    pushforward_entropy,
+    similarity_kernel,
+    similarity_sensitive_entropy,
+    soft_assignment,
+)
 
 PAIRED = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
 
@@ -41,3 +47,28 @@ def test_gradient_reaches_embeddings_and_centroids():
     probs = torch.softmax(torch.randn(8, 4), dim=-1)
     pushforward_entropy(probs, soft_assignment(embeddings, centroids)).sum().backward()
     assert embeddings.grad.abs().sum() > 0 and centroids.grad.abs().sum() > 0
+
+
+def test_similarity_entropy_ignores_how_mass_splits_between_identical_drugs():
+    psi = torch.tensor([[0.0, 0.0], [0.0, 0.0], [4.0, 0.0]])  # drugs 0 and 1 share an embedding
+    Z = similarity_kernel(psi, bandwidth=1.0)
+    a = similarity_sensitive_entropy(torch.tensor([0.5, 0.0, 0.5]), Z)
+    b = similarity_sensitive_entropy(torch.tensor([0.1, 0.4, 0.5]), Z)
+    torch.testing.assert_close(a, b)
+
+
+def test_similarity_entropy_moves_smoothly_between_shannon_and_merged():
+    probs = torch.tensor([0.5, 0.5])
+    far = similarity_sensitive_entropy(probs, similarity_kernel(torch.tensor([[0.0], [10.0]])))
+    near = similarity_sensitive_entropy(probs, similarity_kernel(torch.tensor([[0.0], [0.5]])))
+    same = similarity_sensitive_entropy(probs, similarity_kernel(torch.tensor([[0.0], [0.0]])))
+    assert math.isclose(far.item(), math.log(2), rel_tol=1e-6)
+    assert same.abs().item() < 1e-6
+    assert same < near < far
+
+
+def test_similarity_entropy_gradient_reaches_embeddings():
+    psi = torch.randn(5, 3, requires_grad=True)
+    probs = torch.softmax(torch.randn(8, 5), dim=-1)
+    similarity_sensitive_entropy(probs, similarity_kernel(psi)).sum().backward()
+    assert torch.isfinite(psi.grad).all() and psi.grad.abs().sum() > 0

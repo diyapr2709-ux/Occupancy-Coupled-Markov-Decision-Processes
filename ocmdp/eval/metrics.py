@@ -10,6 +10,12 @@ def failure_rate(failures: np.ndarray) -> float:
     return float(np.mean(failures))
 
 
+def expected_failure_rate(log: EpisodeLog) -> float:
+    """Mean failure probability of the drugs actually given. Same expectation as failure_rate
+    with the patient-outcome noise removed, so policy comparisons need far fewer seeds."""
+    return float(np.mean(log.fail_prob[log.decision_quarter, log.actions]))
+
+
 def time_to_fixation(resistance: np.ndarray, threshold: float) -> np.ndarray:
     """(Q, M) frequencies -> (M,) first quarter each mechanism reaches threshold; inf if never."""
     reached = resistance >= threshold
@@ -53,6 +59,7 @@ def summarize(log: EpisodeLog, assignment: np.ndarray, fixation_threshold: float
     fixation = time_to_fixation(log.resistance, fixation_threshold)
     return {
         "failure_rate": failure_rate(log.failures),
+        "expected_failure_rate": expected_failure_rate(log),
         "first_fixation_q": float(fixation.min()),
         "efficacy_reserve": efficacy_reserve(log.fail_prob[-1], efficacy_threshold),
         "H_action": occupancy_entropy(log.occupancy),

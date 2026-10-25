@@ -35,7 +35,11 @@ def stationary_resistance(pressure: np.ndarray, kappa, delta) -> np.ndarray:
     return kappa * pressure / (kappa * pressure + delta)
 
 
-def failure_probability(r: np.ndarray, cross_resistance: np.ndarray) -> np.ndarray:
-    """Per-drug failure probability given mechanism frequencies r of shape (..., M). Returns (..., A)."""
-    r = np.asarray(r, dtype=np.float64)
-    return 1.0 - np.prod(1.0 - cross_resistance * r[..., None, :], axis=-1)
+def failure_probability(r, cross_resistance):
+    """Per-drug failure probability given mechanism frequencies r of shape (..., M). Returns (..., A).
+
+    Written against the shared numpy/torch array API, so the differentiable mean-field
+    model (ocmdp.theory.mean_field) runs this exact function. Pass both arguments as
+    the same kind of array.
+    """
+    return 1.0 - (1.0 - cross_resistance * r[..., None, :]).prod(-1)

@@ -7,11 +7,13 @@ CleanRL's discrete SAC (sac_atari.py) minimises
 with a scalar alpha. Here entropy is taken on psi#pi instead of pi, alpha is a function
 of state, and the reserve critic C4 enters with Lagrange multiplier xi, so the actor
 ascends E_pi[Q] + alpha(s) H(psi#pi) - xi E_pi[Q_reserve].
+
+The entropy is computed by the caller from the same probs, with either estimator in
+ocmdp.objectives.pushforward_entropy (cluster or similarity form), so the actor loss
+does not commit to one.
 """
 
 import torch
-
-from ocmdp.objectives.pushforward_entropy import pushforward_entropy
 
 
 def actor_loss(
@@ -20,19 +22,22 @@ def actor_loss(
     reserve_q: torch.Tensor,
     alpha: torch.Tensor,
     xi: float,
-    assignment: torch.Tensor,
+    entropy: torch.Tensor,
 ) -> torch.Tensor:
     """
-    probs:      (B, A) policy after the C5 constraint filter
-    q_values:   (B, A) min of the twin reward critics
-    reserve_q:  (B, A) C4 estimate of discounted option-value loss (higher is worse)
-    alpha:      (B,) state-dependent temperature; treated as a constant here
-    xi:         dual variable; treated as a constant here
-    assignment: (A, K) soft assignment of embedded actions to mechanism clusters
+    probs:     (B, A) policy after the C5 constraint filter
+    q_values:  (B, A) min of the twin reward critics
+    reserve_q: (B, A) C4 estimate of discounted option-value loss (higher is worse)
+    alpha:     (B,) state-dependent temperature; treated as a constant here
+    xi:        dual variable; treated as a constant here
+    entropy:   (B,) H(psi#pi), computed from `probs` so that it carries their gradient
     """
+    batch = probs.shape[:-1]
+    if entropy.shape != batch or alpha.shape != batch:
+        # a (B, 1) entropy or alpha would silently broadcast against (B,) into a (B, B) loss
+        raise ValueError(f"entropy {tuple(entropy.shape)} and alpha {tuple(alpha.shape)} must have shape {tuple(batch)}")
     expected_q = (probs * q_values).sum(-1)
     expected_reserve = (probs * reserve_q).sum(-1)
-    entropy = pushforward_entropy(probs, assignment)
     return (-(expected_q + alpha.detach() * entropy) + xi * expected_reserve).mean()
 
 

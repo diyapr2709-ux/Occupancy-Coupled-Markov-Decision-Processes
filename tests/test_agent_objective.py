@@ -3,17 +3,18 @@ import torch
 
 from ocmdp.agents.lagrangian import DualVariable
 from ocmdp.agents.losses import actor_loss, entropy_target, temperature_loss
-from ocmdp.objectives.pushforward_entropy import pushforward
+from ocmdp.objectives.pushforward_entropy import pushforward, pushforward_entropy
 
 PAIRED = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
 
 
-def _optimise(logits, steps=600, **loss_kwargs):
+def _optimise(logits, assignment, steps=600, **loss_kwargs):
     logits = logits.clone().requires_grad_(True)
     opt = torch.optim.Adam([logits], lr=0.05)
     for _ in range(steps):
         opt.zero_grad()
-        actor_loss(torch.softmax(logits, dim=-1), **loss_kwargs).backward()
+        probs = torch.softmax(logits, dim=-1)
+        actor_loss(probs, entropy=pushforward_entropy(probs, assignment), **loss_kwargs).backward()
         opt.step()
     return torch.softmax(logits, dim=-1).detach()
 
@@ -23,7 +24,7 @@ def test_actor_spreads_mass_across_mechanisms():
     zeros = torch.zeros(1, 4)
     probs = _optimise(
         torch.tensor([[3.0, 2.0, 0.0, 0.0]]),
-        q_values=zeros, reserve_q=zeros, alpha=torch.ones(1), xi=0.0, assignment=PAIRED,
+        PAIRED, q_values=zeros, reserve_q=zeros, alpha=torch.ones(1), xi=0.0,
     )
     torch.testing.assert_close(pushforward(probs, PAIRED), torch.tensor([[0.5, 0.5]]), atol=0.02, rtol=0)
 
@@ -31,10 +32,18 @@ def test_actor_spreads_mass_across_mechanisms():
 def test_reserve_price_moves_mass_off_the_depleting_drug():
     probs = _optimise(
         torch.zeros(1, 2),
+        torch.eye(2),
         q_values=torch.zeros(1, 2), reserve_q=torch.tensor([[1.0, 0.0]]),
-        alpha=torch.full((1,), 0.05), xi=1.0, assignment=torch.eye(2),
+        alpha=torch.full((1,), 0.05), xi=1.0,
     )
     assert probs[0, 0] < 0.1
+
+
+@pytest.mark.parametrize("entropy_shape,alpha_shape", [((4, 1), (4,)), ((4,), (4, 1))])
+def test_actor_loss_rejects_shapes_that_would_broadcast(entropy_shape, alpha_shape):
+    probs = torch.full((4, 2), 0.5)
+    with pytest.raises(ValueError):
+        actor_loss(probs, torch.zeros(4, 2), torch.zeros(4, 2), torch.ones(alpha_shape), 0.0, torch.zeros(entropy_shape))
 
 
 def test_temperature_rises_when_entropy_is_below_target():
