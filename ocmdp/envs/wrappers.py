@@ -8,16 +8,17 @@ from gymnasium import spaces
 class MechanismObservation(gym.ObservationWrapper):
     """Observe prescribing as the selection pressure it exerts: every drug-indexed block x becomes x @ C.
 
-    Claim 2 applied to the input side. The kernel depends on prescribing only through
-    Phi(mu) = mu @ C, and pending occupancy and this quarter's counts enter mu linearly,
-    so mapping each of them through C keeps everything the dynamics respond to. What is
-    dropped is exactly the split between drugs with identical cross-resistance rows, which
-    the dynamics cannot see. Without this, a policy that splits mass between such drugs
-    visits occupancy vectors its training data never contained. Proportional but unequal
-    rows stay distinguishable, because C is not row-normalised.
+    The kernel depends on prescribing only through Phi(mu) = mu @ C, and pending occupancy
+    and this quarter's counts enter mu linearly, so mapping each of them through C keeps
+    everything the dynamics respond to. Two prescribing mixes look the same exactly when
+    they exert the same selection pressure: drugs with identical rows, and more generally
+    mixes of drugs whose rows are linearly dependent. Without this, a policy that splits
+    mass between interchangeable drugs differently from its training data sees occupancy
+    vectors that data never contained. Proportional but unequal rows stay distinguishable,
+    because C is not row-normalised.
 
     `mechanism_map` is (A, K) with entries in [0, 1], which keeps every output in [0, 1].
-    The default is the environment's own C; in the full system it comes from C2. Wrap
+    The default is the environment's true C; pass a learned map to avoid using it. Wrap
     the raw environment: the wrapper relies on its observation layout.
     """
 

@@ -1,17 +1,14 @@
-"""C4: efficacy-reserve critic, the shadow price of option depletion.
+"""Efficacy-reserve critic: the shadow price of depleting the set of effective drugs.
 
-Owner: Diya.
+A critic separately parameterised from the reward critics and trained on its own target,
+the discounted net loss of effective drugs,
 
-A third critic, separately parameterised from the twin reward critics and trained on a
-distinct target: the discounted number of drugs that stop being effective,
-
-    Q_res(s, a) = E[ sum_t gamma^t c_t ],   c_t = drugs crossing the efficacy threshold at step t.
+    Q_res(s, a) = E[ sum_t gamma^t c_t ],   c_t = max(0, effective drugs before - after).
 
 It enters the actor loss multiplied by the dual variable xi
-(ocmdp.agents.lagrangian.DualVariable), so option depletion never competes with
-treatment outcome inside a single scalar, and xi is a number a committee can inspect and
-set. Losing a drug is a slow-clock event (it only happens when a quarter closes), so c_t
-is zero on every other step.
+(ocmdp.agents.lagrangian.DualVariable), so depleting drugs never trades against
+treatment outcome inside a single scalar. c_t can only be non-zero when a quarter closes,
+so the critic is meant to be trained on quarter-level transitions.
 """
 
 import numpy as np
@@ -32,19 +29,25 @@ class ReserveCritic(nn.Module):
 
 
 def reserve_cost(fail_prob_before: np.ndarray, fail_prob_after: np.ndarray, threshold: float) -> float:
-    """c_t: drugs that were effective (failure probability below threshold) and no longer are.
+    """c_t: the net drop in the number of effective drugs (failure probability below threshold).
 
-    Drugs regaining efficacy do not offset losses: the cost prices depletion, not net change.
+    A drug regained in the same quarter offsets one lost, so the cost summed over an episode
+    never exceeds the number of drugs that were effective at its start.
     """
-    lost = (np.asarray(fail_prob_before) < threshold) & (np.asarray(fail_prob_after) >= threshold)
-    return float(lost.sum())
+    before, after = np.asarray(fail_prob_before, dtype=np.float64), np.asarray(fail_prob_after, dtype=np.float64)
+    if before.ndim != 1 or before.shape != after.shape:
+        raise ValueError(f"expected two (A,) failure-probability vectors, got shapes {before.shape} and {after.shape}")
+    if not (np.isfinite(before).all() and np.isfinite(after).all()):
+        raise ValueError("failure probabilities must be finite")
+    return float(max(0, int((before < threshold).sum()) - int((after < threshold).sum())))
 
 
 def reserve_td_target(
     cost: torch.Tensor, next_probs: torch.Tensor, next_reserve_q: torch.Tensor, gamma: float, done: torch.Tensor
 ) -> torch.Tensor:
-    """Soft TD target c + gamma (1 - done) E_{a' ~ pi}[Q_res(s', a')], for (B,) cost/done and (B, A) next-state tensors.
+    """Expected-SARSA target c + gamma (1 - done) E_{a' ~ pi}[Q_res(s', a')], for (B,) cost/done and (B, A) next-state tensors.
 
+    gamma is per transition: on quarter-level transitions it is the per-quarter discount.
     `done` may be bool, as Gymnasium returns it.
     """
     if next_reserve_q.shape != next_probs.shape or cost.shape != next_probs.shape[:-1] or done.shape != cost.shape:

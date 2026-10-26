@@ -10,9 +10,6 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.26", "gymnasium>=0.29", "torch>=2.2"]
 
 [project.optional-dependencies]
-graph = ["torch-geometric>=2.5"]
-train = ["tyro>=0.8", "wandb>=0.17", "tensorboard>=2.16"]
-baselines = ["stable-baselines3>=2.3"]
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]

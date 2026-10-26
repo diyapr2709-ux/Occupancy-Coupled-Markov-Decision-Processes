@@ -52,10 +52,17 @@ def test_reserve_critic_shape_and_equivariance():
     torch.testing.assert_close(critic(state, emb[perm]), q[:, perm])
 
 
-def test_reserve_cost_counts_losses_only():
+def test_reserve_cost_is_the_net_drop_in_effective_drugs():
     before = np.array([0.2, 0.5, 0.7, 0.3])
-    after = np.array([0.65, 0.4, 0.5, 0.61])  # drugs 0 and 3 lost; drug 2 regained, which does not offset
-    assert reserve_cost(before, after, threshold=0.6) == 2.0
+    after = np.array([0.65, 0.4, 0.5, 0.61])  # drugs 0 and 3 lost, drug 2 regained: 3 effective -> 2
+    assert reserve_cost(before, after, threshold=0.6) == 1.0
+    assert reserve_cost(after, before, threshold=0.6) == 0.0  # a net gain costs nothing
+
+
+@pytest.mark.parametrize("before,after", [([np.nan, 0.5], [0.9, 0.9]), (0.5, [0.7] * 4), ([0.1, 0.2], [0.1])])
+def test_reserve_cost_rejects_malformed_inputs(before, after):
+    with pytest.raises(ValueError):
+        reserve_cost(before, after, threshold=0.6)
 
 
 def test_reserve_td_target_stops_at_episode_end():

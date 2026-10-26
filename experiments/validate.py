@@ -33,6 +33,13 @@ def _cell(agg: dict) -> str:
     return f"{cell} ({agg['never']} never)" if agg["never"] else cell
 
 
+def _interval(agg: dict) -> str:
+    """Mean with its 95% t-interval, for paired differences where the interval is the point."""
+    if agg["ci95"] is None:
+        return f"{agg['mean']:+.4f}"
+    return f"{agg['mean']:+.4f}  [{agg['mean'] - agg['ci95']:+.4f}, {agg['mean'] + agg['ci95']:+.4f}]"
+
+
 def _report_path(out: Path) -> Path:
     """A fresh file per run: the pid and microseconds keep concurrent runs from overwriting each other."""
     stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{time.time_ns() // 1000 % 1_000_000:06d}_{os.getpid()}"
@@ -42,16 +49,20 @@ def _report_path(out: Path) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seeds", type=int, nargs="*", default=list(SEEDS))
-    parser.add_argument("--quick", action="store_true", help="first two seeds only")
+    parser.add_argument("--quick", action="store_true", help="first two seeds only, everywhere")
+    parser.add_argument("--noise-seeds", type=int, default=20, help="seeds for the noise study, whose paired gains need more")
     parser.add_argument("--verification-only", action="store_true")
     parser.add_argument("--out", type=Path, default=Path("runs/vv"))
     args = parser.parse_args()
     seeds = tuple(args.seeds[:2] if args.quick else args.seeds)
+    noise_seeds = tuple(range(2 if args.quick else args.noise_seeds))
     # fail before any work, not after an hour of it
     if not seeds:
         parser.error("--seeds needs at least one seed")
     if any(s < 0 for s in seeds):
         parser.error("seeds must be non-negative")
+    if args.noise_seeds < 1:
+        parser.error("--noise-seeds must be at least 1")
     if args.out.exists() and not args.out.is_dir():
         parser.error(f"--out {args.out} exists and is not a directory")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -66,7 +77,7 @@ def main() -> int:
     for c in checks:
         print(f"  [{c.status:^7}] {c.name:<45} {c.detail}")
     report["verification"] = [vars(c) for c in checks]
-    failed = [c.name for c in checks if c.status not in ("pass", "pending")]
+    failed = [c.name for c in checks if c.status != "pass"]
     save()
 
     if not args.verification_only:
@@ -90,21 +101,21 @@ def main() -> int:
         for factor, row in sweep.items():
             print(f"  horizon x{factor:<5} lam' = {row['lam']:.3f}   expected failure rate {_cell(row['expected_failure_rate'])}")
 
-        report["noise_robustness"] = {}
-        for name, cfg in (("TwoDrug", ToyConfig.two_drug()), ("PairedDrugs", ToyConfig.paired())):
-            study = noise_robustness(cfg, seeds)
-            report["noise_robustness"][name] = {str(k): v for k, v in study.items()}
-            save()
-            print(f"\nExpected failure rate under resistance process noise, {name}")
-            for sigma, row in study.items():
-                print(f"  sigma {sigma}")
-                for k, v in row.items():
-                    print(f"    {k:<24} {_cell(v)}")
+        # TwoDrug only: at rho = 0 PairedDrugs has the same mechanism dynamics, so it would not be independent
+        study = noise_robustness(ToyConfig.two_drug(), noise_seeds)
+        report["noise_robustness"] = {"env": "TwoDrug", "seeds": list(noise_seeds), **{str(k): v for k, v in study.items()}}
+        save()
+        print(f"\nResistance process noise, TwoDrug ({len(noise_seeds)} seeds; gains are paired, with 95% intervals)")
+        for sigma, row in study.items():
+            rates = "  ".join(f"{k} {row[k]['mean']:.4f}" for k in ("uniform", "tuned_rotation", "oracle[open-loop]", "oracle[closed-loop]"))
+            print(f"  sigma {sigma:<4} {rates}")
+            print(f"             replanning gain {_interval(row['replanning_gain'])}   gain over rotation {_interval(row['gain_over_rotation'])}")
 
         study = distillation_study(ToyConfig.paired(), seeds)
         report["distillation"] = study
         save()
-        print("\nC3 distilled from the oracle, PairedDrugs (expected failure rate)")
+        print("\nPolicy head distilled from the oracle, PairedDrugs, held-out starting states (expected failure rate)")
+        print("  privileged: true cross-resistance embeddings and map, noise-free resistance in the observation")
         for name, agg in study.items():
             print(f"  {name:<26} {_cell(agg)}")
 

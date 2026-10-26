@@ -1,8 +1,8 @@
-"""Verification and validation harness (Section 5 of the proposal).
+"""Verification and validation harness.
 
 Verification asks whether the implementation does what the specification says. Each
-check returns pass, fail, or pending (its component does not exist yet). pytest runs
-every check (tests/test_verification.py), so a failing check fails the build.
+check returns pass or fail. pytest runs every check (tests/test_verification.py), so a
+failing check fails the build.
 
 Validation asks whether policies achieve the outcome. It returns measurements, not
 verdicts: the comparator table with regret against the full-information oracle, and the
@@ -39,7 +39,7 @@ FIXATION_THRESHOLD = 0.6
 EFFICACY_THRESHOLD = 0.6
 
 
-STATUSES = ("pass", "fail", "pending")
+STATUSES = ("pass", "fail")
 
 
 @dataclass
@@ -113,11 +113,6 @@ def constraint_filter_never_infeasible() -> CheckResult:
 
 
 @verification
-def embedding_does_not_collapse() -> CheckResult:
-    return CheckResult("embedding_does_not_collapse", "pending", "needs C2 (ocmdp.components.action_encoder)")
-
-
-@verification
 def analytical_two_drug_reproduced() -> CheckResult:
     cfg = ToyConfig.two_drug(rho=0.25, horizon_quarters=600, decisions_per_quarter=50)
     env = ToyOCMDPEnv(cfg)
@@ -161,8 +156,8 @@ def mean_field_model_matches_env() -> CheckResult:
 
 @verification
 def env_factors_through_pushforward() -> CheckResult:
-    """Premise of claim 2, in the environment itself: policies that differ only in how mass splits between
-    drugs with identical cross-resistance rows produce identical resistance paths and failure rates."""
+    """Policies that differ only in how mass splits between drugs with identical cross-resistance
+    rows produce identical resistance paths and failure rates in the environment itself."""
     env = ToyOCMDPEnv(ToyConfig.paired(rho=0.3))
     pairs = [
         (FixedGuideline(4, 0), FixedGuideline(4, 1)),
@@ -206,8 +201,8 @@ def oracle_plan_dominates_heuristic_schedules() -> CheckResult:
             values.append(float(model.simulate(torch.from_numpy(schedule))[0].mean()))
         rows[name] = {"oracle": oracle.predicted_failure_rate, "best_heuristic": float(np.min(values))}
     excess = float(np.max([v["oracle"] - v["best_heuristic"] for v in rows.values()]))
-    return _within(
-        "oracle_plan_dominates_heuristic_schedules", excess, 0.0,
+    return _within(  # 1e-9: the rotation start is encoded as log-probabilities floored at 1e-9
+        "oracle_plan_dominates_heuristic_schedules", excess, 1e-9,
         "mean-field failure rate, oracle vs best heuristic: "
         + "; ".join(f"{k} {v['oracle']:.4f} vs {v['best_heuristic']:.4f}" for k, v in rows.items()),
         **rows,
@@ -215,14 +210,14 @@ def oracle_plan_dominates_heuristic_schedules() -> CheckResult:
 
 
 def comparators(env: gym.Env) -> list[HeuristicPolicy]:
-    """Table 1 comparators that exist so far, for a toy environment. The oracle is always last.
+    """Comparators for a toy environment. The oracle is always last.
 
     Within-class and cross-class mixing are added only when the cross-resistance matrix
     has classes of drugs with identical rows to mix within and across.
     """
     n = env.action_space.n
     policies: list[HeuristicPolicy] = [FixedGuideline(n, 0)]
-    classes = _identical_row_classes(env.unwrapped.coupling.matrix)
+    classes = env.unwrapped.coupling.identical_row_classes()
     multi = [c for c in classes if len(c) >= 2]
     if multi and len(classes) >= 2:
         within, across = np.zeros(n), np.zeros(n)
@@ -231,13 +226,6 @@ def comparators(env: gym.Env) -> list[HeuristicPolicy]:
         policies += [StationaryMixing(within, name="within-class"), StationaryMixing(across, name="cross-class")]
     policies += [Cycling(n, period=4), tuned_cycling(env.unwrapped.config), uniform_mixing(n), FullInformationOracle(env)]
     return policies
-
-
-def _identical_row_classes(C: np.ndarray) -> list[tuple[int, ...]]:
-    classes: dict[bytes, list[int]] = {}
-    for drug, row in enumerate(C):
-        classes.setdefault(row.tobytes(), []).append(drug)
-    return [tuple(c) for c in classes.values()]
 
 
 def comparator_table(env: gym.Env, seeds: tuple[int, ...]) -> dict[str, dict[str, dict]]:
@@ -277,18 +265,22 @@ def lambda_misspecification(
 
 
 def noise_robustness(
-    config: ToyConfig, seeds: tuple[int, ...], noise_levels: tuple[float, ...] = (0.0, 0.05, 0.1, 0.2)
+    config: ToyConfig, seeds: tuple[int, ...], noise_levels: tuple[float, ...] = (0.0, 0.1, 0.2, 0.4)
 ) -> dict[float, dict[str, dict]]:
     """Expected failure rate as resistance process noise grows.
 
-    Tuned cycling and the open-loop oracle commit before the episode, using the noise-free
+    The tuned rotation and the open-loop oracle commit before the episode, using the
+    noise-free model; the open-loop plan is at least as good as the tuned rotation in that
     model. The closed-loop oracle re-plans every 4 quarters from the state actually
-    reached. Uniform mixing never commits to anything. Every policy sees the same shocks
-    for a given seed, so per-seed differences are paired:
+    reached, each time starting from the best rotation for that state. Uniform mixing never
+    commits to anything. Every policy sees the same shocks for a given seed, so per-seed
+    differences are paired:
       replanning_gain    = open-loop - closed-loop oracle: the same planner with and
                            without feedback, so this isolates what re-planning is worth;
-      gain_over_rotation = tuned cycling - closed-loop oracle: everything the oracle adds
-                           over the best blind rotation (planning and feedback together).
+      gain_over_rotation = tuned rotation - closed-loop oracle: what the oracle adds over
+                           the best rotation committed to in advance.
+    At sigma 0.4 the paired differences have a standard deviation around 0.07, so read
+    the ci95 field: with a handful of seeds these gains are not distinguishable from zero.
     """
     tuned = tuned_cycling(config)
     out = {}
@@ -304,20 +296,32 @@ def noise_robustness(
         out[sigma] = {name: aggregate(r) for name, r in rates.items()}
         out[sigma]["replanning_gain"] = aggregate(rates["oracle[open-loop]"] - rates["oracle[closed-loop]"])
         out[sigma]["gain_over_rotation"] = aggregate(rates[tuned.name] - rates["oracle[closed-loop]"])
+        out[sigma]["tuned_rotation"] = out[sigma].pop(tuned.name)
     return out
 
 
-def distillation_study(config: ToyConfig, seeds: tuple[int, ...], dagger_rounds: int = 3) -> dict[str, dict]:
-    """Can C3, seeing only the observation, reproduce the full-information oracle?
+def distillation_study(
+    config: ToyConfig, seeds: tuple[int, ...], dagger_rounds: int = 3, r0_spread: float = 0.04, mu0_spread: float = 0.5
+) -> dict[str, dict]:
+    """Can the policy head, seeing only the observation, reproduce the full-information oracle?
 
-    Trained on the oracle's action distributions over the protocol seeds and evaluated on
-    the evaluation seeds. Embeddings are the ground-truth cross-resistance rows (what C2
-    should learn). No reward is used: this checks representational capacity, not RL.
+    Trained on the oracle's action distributions from the protocol seeds and evaluated on
+    the evaluation seeds. The starting state is jittered per episode (`r0_spread`,
+    `mu0_spread`), so evaluation episodes start from states no training episode started
+    from. Without that jitter every noise-free episode follows the same resistance path
+    and the evaluation would be in-sample.
+
+    Uses privileged information an agent would not have: the embeddings are the true
+    cross-resistance rows, and the mechanism-space variants map observations through the
+    true C. The observation also carries exact, noise-free resistance frequencies. No
+    reward is used, so this checks representational capacity, not RL.
     """
+    config = replace(config, r0_spread=r0_spread, mu0_spread=mu0_spread)
     variants = {
-        "C3 cloned, drug obs": (False, 0),
-        "C3 DAgger, drug obs": (False, dagger_rounds),
-        "C3 DAgger, mechanism obs": (True, dagger_rounds),
+        "cloned, drug obs": (False, 0),
+        "cloned, mechanism obs": (True, 0),
+        "DAgger, drug obs": (False, dagger_rounds),
+        "DAgger, mechanism obs": (True, dagger_rounds),
     }
     embeddings = torch.tensor(config.cross_resistance, dtype=torch.float32)
     out = {}
@@ -338,11 +342,17 @@ def distillation_study(config: ToyConfig, seeds: tuple[int, ...], dagger_rounds:
     return out
 
 
+# two-sided 95% Student-t quantiles for 1..30 degrees of freedom; 1.96 beyond
+_T95 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131,
+        2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042)
+
+
 def aggregate(values) -> dict:
-    """Mean and sample std over the finite values; `never` counts +inf (seeds where no mechanism fixed).
+    """Mean, sample std and 95% t-interval half-width over the finite values; `never` counts +inf
+    (seeds where no mechanism fixed).
 
     NaN or -inf means a metric is broken, not that an event never happened, so it raises.
-    With one finite value there is no spread to report, so std is None.
+    With one finite value there is no spread to report, so std and ci95 are None.
     """
     v = np.asarray(values, dtype=float)
     if v.size == 0:
@@ -351,6 +361,8 @@ def aggregate(values) -> dict:
         raise ValueError(f"metric values contain NaN or -inf: {v}")
     finite = v[np.isfinite(v)]
     if finite.size == 0:
-        return {"mean": None, "std": None, "never": int(v.size)}
-    std = float(finite.std(ddof=1)) if finite.size > 1 else None
-    return {"mean": float(finite.mean()), "std": std, "never": int(v.size - finite.size)}
+        return {"mean": None, "std": None, "ci95": None, "never": int(v.size)}
+    n = finite.size
+    std = float(finite.std(ddof=1)) if n > 1 else None
+    ci95 = (_T95[n - 2] if n - 1 <= len(_T95) else 1.96) * std / np.sqrt(n) if n > 1 else None
+    return {"mean": float(finite.mean()), "std": std, "ci95": ci95, "never": int(v.size - finite.size)}

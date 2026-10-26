@@ -2,8 +2,7 @@
 
 Small enough that the stationary analysis in ocmdp.theory.two_drug is exact in the
 mean-field limit, and rich enough to separate action entropy from pushforward entropy
-once several drugs share a mechanism. The full stewardship environment keeps this
-interface and replaces the dynamics.
+once several drugs share a mechanism.
 
 Timing. One step is one empiric prescribing decision. After every
 `decisions_per_quarter` steps the quarter closes: its empirical action distribution
@@ -11,9 +10,18 @@ enters the occupancy measure (visible to the kernel `delay` quarters later), sel
 pressure is recomputed through Phi, and resistance moves one step. The kernel is fixed
 within a quarter, so no single action can influence it.
 
+Initial state. By default every episode starts from r0 and mu0, so without noise the
+seed only changes patient outcomes and every episode follows the same resistance path.
+`r0_spread` and `mu0_spread` jitter the starting state per episode (r0 by up to
++/- r0_spread, mu0 mixed with weight mu0_spread toward a random history), which is what
+makes evaluation seeds genuinely held out from training seeds.
+
 Noise. With `resistance_noise` > 0, resistance also takes a drift shock each quarter,
 scaled by sqrt(r (1 - r)) as in Wright-Fisher sampling of carriers, so it is zero at
-r = 0 and r = 1. The mean-field model (ocmdp.theory.mean_field) is the noise-free
+r = 0 and r = 1. A shock that would leave [0, 1] is reflected back into the symmetric
+interval [-min(r, 1 - r), min(r, 1 - r)] instead of clipped. Clipping biases the mean
+upward near the boundaries; reflection is an odd map, so the shock stays mean-zero and
+noise changes the spread of outcomes but not their expectation under a fixed schedule. The mean-field model (ocmdp.theory.mean_field) is the noise-free
 skeleton, so with noise on, a plan made from it goes stale and has to be refreshed from
 the state actually reached.
 
@@ -37,6 +45,16 @@ from ocmdp.core.occupancy import OccupancyMeasure
 from ocmdp.core.selection import check_rates, failure_probability, resistance_step
 
 PerMechanism = float | tuple[float, ...]
+
+
+def reflect(x: np.ndarray, bound: np.ndarray) -> np.ndarray:
+    """Fold x into [-bound, bound] by reflecting at the edges. Odd in x, so a symmetric x stays symmetric."""
+    x, bound = np.asarray(x, dtype=np.float64), np.asarray(bound, dtype=np.float64)
+    period = 4.0 * bound
+    safe = np.where(period > 0, period, 1.0)
+    y = np.mod(x + bound, safe)
+    folded = np.where(y > 2.0 * bound, safe - y, y) - bound
+    return np.where(bound > 0, folded, 0.0)
 
 
 def per_mechanism(value: PerMechanism, n_mechanisms: int) -> np.ndarray:
@@ -66,6 +84,8 @@ class ToyConfig:
     expected_reward: bool = False  # reward -P(fail) instead of a sampled failure
     markov_observation: bool = False
     resistance_noise: float = 0.0  # drift: sd of the per-quarter shock is resistance_noise * sqrt(r (1 - r))
+    r0_spread: float = 0.0  # per-episode uniform jitter of r0, absolute, clipped to [0, 1]
+    mu0_spread: float = 0.0  # per-episode weight in [0, 1] of a Dirichlet(1) history mixed into mu0
 
     @classmethod
     def two_drug(cls, rho: float = 0.0, **kwargs) -> "ToyConfig":
@@ -95,6 +115,8 @@ class ToyOCMDPEnv(gym.Env):
             raise ValueError("contraindication_rate must lie in [0, 1)")
         if not 0.0 <= cfg.resistance_noise < np.inf:  # also rejects NaN
             raise ValueError(f"resistance_noise must be finite and non-negative, got {cfg.resistance_noise}")
+        if not (0.0 <= cfg.r0_spread < np.inf and 0.0 <= cfg.mu0_spread <= 1.0):  # also rejects NaN
+            raise ValueError("need a finite r0_spread >= 0 and mu0_spread in [0, 1]")
         self.coupling = CrossResistanceCoupling(cfg.cross_resistance)
         n_drugs, n_mech = self.coupling.n_drugs, self.coupling.n_mechanisms
         self.kappa = per_mechanism(cfg.kappa, n_mech)
@@ -111,8 +133,15 @@ class ToyOCMDPEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
-        self.occupancy.reset()
+        cfg = self.config
+        mu0 = None
+        if cfg.mu0_spread > 0:  # each jitter draws only when on, so default seeds are unchanged
+            history = self.np_random.dirichlet(np.ones(self.coupling.n_drugs))
+            mu0 = (1.0 - cfg.mu0_spread) * self.occupancy.reset() + cfg.mu0_spread * history
+        self.occupancy.reset(mu0)
         self._r = self.r0.copy()
+        if cfg.r0_spread > 0:
+            self._r = np.clip(self._r + self.np_random.uniform(-cfg.r0_spread, cfg.r0_spread, self.coupling.n_mechanisms), 0.0, 1.0)
         self._fail_prob = failure_probability(self._r, self.coupling.matrix)
         self._counts = np.zeros(self.coupling.n_drugs)
         self._quarter = 0
@@ -163,9 +192,9 @@ class ToyOCMDPEnv(gym.Env):
         mu = self.occupancy.update(self._counts / self._counts.sum())
         self._r = resistance_step(self._r, self.coupling(mu), self.kappa, self.delta)
         if self.config.resistance_noise > 0:  # draws only when on, so noise-free seeds are unchanged
-            shock = self.np_random.standard_normal(self.coupling.n_mechanisms)
-            scale = np.sqrt(np.clip(self._r * (1.0 - self._r), 0.0, None))
-            self._r = np.clip(self._r + self.config.resistance_noise * scale * shock, 0.0, 1.0)
+            shock = self.config.resistance_noise * np.sqrt(np.clip(self._r * (1.0 - self._r), 0.0, None))
+            shock *= self.np_random.standard_normal(self.coupling.n_mechanisms)
+            self._r = np.clip(self._r + reflect(shock, np.minimum(self._r, 1.0 - self._r)), 0.0, 1.0)
         self._fail_prob = failure_probability(self._r, self.coupling.matrix)
         self._counts[:] = 0
         self._decision = 0

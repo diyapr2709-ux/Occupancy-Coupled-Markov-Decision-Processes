@@ -1,1 +1,1 @@
-"""Architecture components C1-C5 (Figure 1 of the proposal)."""
+"""Policy head, reserve critic, and per-patient constraint filter."""

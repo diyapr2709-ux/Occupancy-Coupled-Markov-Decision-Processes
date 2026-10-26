@@ -1,4 +1,4 @@
-"""C5: hard projection onto each patient's feasible set.
+"""Constraint filter: hard projection onto each patient's feasible set.
 
 Infeasible actions get probability zero before sampling, so the violation rate is zero
 by construction rather than a penalty the policy could trade away. The feasible set

@@ -1,4 +1,4 @@
-"""Validation and verification metrics (Section 5 of the proposal)."""
+"""Episode metrics computed from an EpisodeLog."""
 
 import numpy as np
 
@@ -29,10 +29,6 @@ def efficacy_reserve(fail_prob: np.ndarray, threshold: float) -> int:
     return int(np.sum(fail_prob < threshold))
 
 
-def regret(failures: np.ndarray, oracle_failures: np.ndarray) -> float:
-    return float(np.sum(failures) - np.sum(oracle_failures))
-
-
 def entropy(p: np.ndarray) -> np.ndarray:
     p = np.asarray(p, dtype=np.float64)
     return -np.sum(np.where(p > 0, p * np.log(np.where(p > 0, p, 1.0)), 0.0), axis=-1)
@@ -44,17 +40,9 @@ def occupancy_entropy(occupancy: np.ndarray) -> float:
 
 
 def pushforward_occupancy_entropy(occupancy: np.ndarray, assignment: np.ndarray) -> float:
-    """Mean over quarters of H(psi#mu_t). The gap to occupancy_entropy is the mechanism being claimed."""
+    """Mean over quarters of H(psi#mu_t): entropy over mechanisms rather than drugs."""
     return float(np.mean(entropy(occupancy @ assignment)))
 
-
-def effective_dimensionality(embeddings: np.ndarray) -> float:
-    """Participation ratio of the embedding covariance spectrum; near 1 means psi has collapsed."""
-    x = np.asarray(embeddings, dtype=np.float64)
-    eig = np.linalg.svd(x - x.mean(axis=0), compute_uv=False) ** 2
-    if eig.sum() == 0:
-        return 0.0
-    return float(eig.sum() ** 2 / np.sum(eig**2))
 
 
 def summarize(log: EpisodeLog, assignment: np.ndarray, fixation_threshold: float = 0.5, efficacy_threshold: float = 0.5) -> dict:

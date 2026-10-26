@@ -1,6 +1,6 @@
 """Non-learning comparators: fixed guideline, cycling, and stationary (incl. uniform) mixing.
 
-All of them pass through the C5 filter when the environment supplies a feasibility mask,
+All of them pass through the constraint filter when the environment supplies a feasibility mask,
 so they are compared with the learned policy under the same clinical constraints.
 """
 
@@ -67,3 +67,32 @@ class StationaryMixing(HeuristicPolicy):
 
 def uniform_mixing(n_drugs: int) -> StationaryMixing:
     return StationaryMixing(np.full(n_drugs, 1.0 / n_drugs), name="uniform")
+
+
+class ScheduledPolicy(HeuristicPolicy):
+    """A fixed (Q, A) schedule of per-quarter action distributions, committed to before the episode."""
+
+    def __init__(self, schedule: np.ndarray, name: str = "scheduled"):
+        schedule = np.asarray(schedule, dtype=np.float64)
+        if schedule.ndim != 2 or np.any(schedule < 0) or not np.allclose(schedule.sum(axis=1), 1.0):
+            raise ValueError("schedule must be a (quarters, drugs) array of distributions")
+        self._schedule = schedule
+        self.name = name
+
+    def probs(self, obs, info):
+        return self._schedule[min(info["quarter"], len(self._schedule) - 1)]
+
+
+class MyopicGreedy(HeuristicPolicy):
+    """Give the drug with the lowest current failure probability, splitting ties evenly.
+
+    Reacts to the state every quarter but ignores the lag between prescribing and
+    selection pressure, so it switches only once the failure curves have already crossed.
+    """
+
+    name = "greedy"
+
+    def probs(self, obs, info):
+        f = info["fail_prob"]
+        best = np.isclose(f, f.min())
+        return best / best.sum()

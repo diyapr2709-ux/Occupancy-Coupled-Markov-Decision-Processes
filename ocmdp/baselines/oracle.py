@@ -6,14 +6,25 @@ the differentiable mean-field model (ocmdp.theory.mean_field), re-planning every
 per-quarter action distribution, so the oracle can be non-stationary and can rotate,
 which a stationary policy cannot. Planning optimises softmax logits with Adam from
 several starts. The objective is non-convex, and a symmetric start stays on the
-symmetric (uniform) saddle, so the starts include cycling schedules and random ones.
+symmetric (uniform) saddle, so every plan also starts from the best rotation found from
+the current state (`best_rotation`); the first plan adds cycling and random starts.
+Because the best iterate is kept, every plan is at least as good in the model as the
+best rotation from the state it was made in.
+
+Drugs with identical cross-resistance rows are interchangeable: the same failure
+probability and the same selection pressure. The planner is indifferent between them
+and splits mass among them arbitrarily, so the oracle averages its plan within each
+such class. That leaves its failure rate unchanged and gives a canonical action
+distribution, which a policy distilled from it can actually reproduce.
 
 Passing `lam` runs the planner under a misspecified occupancy memory while the
 environment keeps its own. This is how degradation under lam misspecification is measured.
 
-Limitation: the mean-field model ignores contraindications, so with
-contraindication_rate > 0 the realised mix departs from the plan and the oracle is no
-longer an upper bound.
+It is the best schedule the planner finds, not a proven optimum. Where its model is
+exact (no process noise, no contraindications) it is at least as good in the model as
+every comparator, which ocmdp.eval.vv checks. With `resistance_noise` > 0 it plans on the
+noise-free model, and with contraindications the realised mix departs from the plan; in
+those settings regret against it can be negative.
 """
 
 import itertools
@@ -21,7 +32,8 @@ import itertools
 import numpy as np
 import torch
 
-from ocmdp.baselines.heuristics import Cycling, HeuristicPolicy
+from ocmdp.baselines.heuristics import HeuristicPolicy, ScheduledPolicy
+from ocmdp.core.coupling import CrossResistanceCoupling
 from ocmdp.envs.toy import ToyConfig
 from ocmdp.theory.mean_field import MeanFieldModel, MeanFieldState
 
@@ -66,28 +78,55 @@ def starting_logits(n_quarters: int, n_drugs: int, n_random: int, generator: tor
     return torch.stack(starts)
 
 
-def tuned_cycling(config: ToyConfig, max_orders_drugs: int = 6, chunk: int = 256) -> Cycling:
-    """The best blind rotation: order and period chosen on the mean-field model from the true dynamics.
+def rotation_schedules(classes: list[tuple[int, ...]], n_drugs: int, n_quarters: int, max_full_orders: int = 4):
+    """Yield (schedule, description) for every fixed-period rotation over classes of interchangeable drugs.
 
-    The oracle's plan is a rotation, so this is the heuristic it should be compared with.
-    Like the oracle it uses full information, but only once, before the episode, and
-    never looks at the state again. All cyclic orders are searched for up to
-    `max_orders_drugs` drugs, and the index order beyond that.
+    A rotation gives each class a block of `period` quarters in turn, except that the first
+    block may be shorter (phase offset 1..period). Mass is split evenly within a class.
+    All orders of the classes are searched for up to `max_full_orders` classes, and the
+    index order with each of its cyclic shifts beyond that.
+    """
+    k = len(classes)
+    if k <= max_full_orders:
+        orders = list(itertools.permutations(range(k)))
+    else:
+        orders = [tuple((i + shift) % k for i in range(k)) for shift in range(k)]
+    class_rows = np.zeros((k, n_drugs))
+    for c, members in enumerate(classes):
+        class_rows[c, list(members)] = 1.0 / len(members)
+    q = np.arange(n_quarters)
+    for order in orders:
+        for period in range(1, n_quarters + 1):
+            for first in range(1, period + 1):
+                block = np.where(q < first, 0, 1 + (q - first) // period)
+                yield class_rows[np.array(order)[block % k]], (order, period, first)
+
+
+def best_rotation(model: MeanFieldModel, state: MeanFieldState, classes: list[tuple[int, ...]], n_quarters: int, chunk: int = 512):
+    """The rotation with the lowest mean-field failure rate from `state`: (schedule, value, description)."""
+    n_drugs = model.C.shape[0]
+    best = (None, float("inf"), None)
+    candidates = rotation_schedules(classes, n_drugs, n_quarters)
+    while batch := list(itertools.islice(candidates, chunk)):  # chunked: the candidate count grows as k! * Q^2
+        schedules = torch.from_numpy(np.stack([s for s, _ in batch]))
+        with torch.no_grad():
+            values = model.simulate(schedules, state)[0].mean(-1)
+        i = int(values.argmin())
+        if values[i].item() < best[1]:
+            best = (batch[i][0], values[i].item(), batch[i][1])
+    return best
+
+
+def tuned_cycling(config: ToyConfig) -> ScheduledPolicy:
+    """The best blind rotation: order, period and phase chosen on the mean-field model from the nominal start.
+
+    Like the oracle it uses the true dynamics, but only once, before the episode, and
+    never looks at the state again.
     """
     model = MeanFieldModel(config)
-    n, horizon = len(config.cross_resistance), config.horizon_quarters
-    orders = [(0, *rest) for rest in itertools.permutations(range(1, n))] if n <= max_orders_drugs else [tuple(range(n))]
-    candidates = [(order, period) for order in orders for period in range(1, horizon + 1)]
-    q = np.arange(horizon)
-    values = []
-    for start in range(0, len(candidates), chunk):  # bounded memory: (n-1)! * H schedules of H x n would not fit
-        schedules = np.stack([np.eye(n)[np.array(order)[(q // period) % n]] for order, period in candidates[start : start + chunk]])
-        with torch.no_grad():
-            values.append(model.simulate(torch.from_numpy(schedules))[0].mean(-1))
-    order, period = candidates[int(torch.cat(values).argmin())]
-    policy = Cycling(n, period=period, drugs=order)
-    policy.name = f"tuned-cycling[{period}q]"
-    return policy
+    classes = CrossResistanceCoupling(config.cross_resistance).identical_row_classes()
+    schedule, _, (_, period, first) = best_rotation(model, model.initial_state(), classes, config.horizon_quarters)
+    return ScheduledPolicy(schedule, name=f"tuned-rotation[{period}q,first {first}q]")
 
 
 class FullInformationOracle(HeuristicPolicy):
@@ -106,6 +145,11 @@ class FullInformationOracle(HeuristicPolicy):
             raise ValueError(f"replan_every must be at least 1, got {replan_every}")
         self.env = env.unwrapped
         self.model = MeanFieldModel(self.env.config, lam=lam)
+        n_drugs = self.env.action_space.n
+        self._classes = self.env.coupling.identical_row_classes()
+        self._class_average = np.zeros((n_drugs, n_drugs))
+        for members in self._classes:
+            self._class_average[np.ix_(members, members)] = 1.0 / len(members)
         self.name = name or ("oracle" if lam is None else f"oracle[lam={lam:.2f}]")
         self.replan_every = replan_every
         self.steps = steps
@@ -129,7 +173,7 @@ class FullInformationOracle(HeuristicPolicy):
             self._replan(q, info)
         elif q - self._plan_start >= self.replan_every:
             self._replan(q, info)
-        return torch.softmax(self._plan[q - self._plan_start], -1).numpy()
+        return torch.softmax(self._plan[q - self._plan_start], -1).numpy() @ self._class_average
 
     def _replan(self, quarter: int, info: dict) -> None:
         true = self.env.state()
@@ -139,10 +183,15 @@ class FullInformationOracle(HeuristicPolicy):
         remaining = self.env.config.horizon_quarters - quarter
         state = self.model.state_from_env(self.env)
         n_drugs = self.env.action_space.n
+        rotation, _, _ = best_rotation(self.model, state, self._classes, remaining)
+        # log-probabilities, so the softmax reproduces the rotation exactly (a scaled one-hot would only approximate it)
+        rotation_logits = torch.from_numpy(rotation).clamp_min(1e-9).log()[None]
         if self._plan is None:
-            init, steps = starting_logits(remaining, n_drugs, self.n_random, self._generator), self.steps
+            init = torch.cat([rotation_logits, starting_logits(remaining, n_drugs, self.n_random, self._generator)])
+            steps = self.steps
         else:
-            init, steps = self._plan[quarter - self._plan_start :][None], self.refine_steps
+            init = torch.cat([self._plan[quarter - self._plan_start :][None], rotation_logits])
+            steps = self.refine_steps
         self._plan, planned = plan_schedule(self.model, state, init, steps)
         self._plan_start = quarter
         if quarter == 0:

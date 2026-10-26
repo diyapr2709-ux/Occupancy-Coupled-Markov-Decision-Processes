@@ -1,11 +1,9 @@
-"""C3: stochastic mixing policy head over the embedded action set, with state-dependent temperature.
-
-Owner: Diya.
+"""Stochastic mixing policy head over the embedded action set, with state-dependent temperature.
 
 Each embedded action is scored against the state by a shared pairwise MLP
 (ocmdp.components.pairwise), so drugs with nearby embeddings receive correlated logits.
-The C5 mask is applied to logits before the softmax, which puts exactly zero mass on
-infeasible drugs. A second head outputs log alpha(s), trained with
+The feasibility mask is applied to logits before the softmax, which puts exactly zero
+mass on infeasible drugs. A second head outputs log alpha(s), trained with
 ocmdp.agents.losses.temperature_loss against ocmdp.agents.losses.entropy_target. That
 state dependence is the only way a learned policy can beat uniform mixing.
 """
@@ -30,4 +28,5 @@ class MixingPolicyHead(nn.Module):
         logits, h = self.scorer(state, action_embeddings)
         if mask is not None:
             logits = mask_logits(logits, mask)
-        return torch.softmax(logits, dim=-1), self.log_alpha_head(h).squeeze(-1)
+        # the temperature head reads the state features but does not shape them
+        return torch.softmax(logits, dim=-1), self.log_alpha_head(h.detach()).squeeze(-1)

@@ -1,1 +1,1 @@
-"""Comparators from Table 1 of the proposal."""
+"""Non-learning comparators and the full-information oracle."""

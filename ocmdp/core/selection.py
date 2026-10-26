@@ -11,8 +11,7 @@ any mechanism it is susceptible to is present:
 
     P(fail | a) = 1 - prod_j (1 - C[a, j] * r_j)
 
-The full environment replaces this with fitness landscapes and ward transmission; this
-model exists because its stationary behaviour has a closed form.
+The model is kept linear so that its stationary behaviour has a closed form.
 """
 
 import numpy as np

@@ -1,4 +1,4 @@
-"""Every V&V verification check must pass (pending is allowed until its component exists)."""
+"""Every V&V verification check must pass."""
 
 import numpy as np
 import pytest
@@ -14,7 +14,7 @@ from ocmdp.eval.vv import VERIFICATION, aggregate, comparator_table, comparators
 @pytest.mark.parametrize("name", list(VERIFICATION))
 def test_verification_check(name):
     result = VERIFICATION[name]()
-    assert result.status in ("pass", "pending"), f"{name}: {result.detail}"
+    assert result.status == "pass", f"{name}: {result.detail}"
 
 
 def test_comparator_table_regret_is_paired_by_seed_and_positive_when_worse():
@@ -36,7 +36,9 @@ def test_comparator_table_regret_is_paired_by_seed_and_positive_when_worse():
 def test_aggregate_uses_sample_std_and_counts_only_positive_infinity_as_never():
     agg = aggregate([1.0, 2.0, 3.0, 4.0, 5.0])
     assert agg["std"] == pytest.approx(np.std([1, 2, 3, 4, 5], ddof=1))
-    assert aggregate([np.inf, 2.0, 4.0]) == {"mean": 3.0, "std": pytest.approx(np.sqrt(2)), "never": 1}
+    assert agg["ci95"] == pytest.approx(2.776 * agg["std"] / np.sqrt(5))  # t(0.975, df=4)
+    assert aggregate([np.inf, 2.0, 4.0]) == {"mean": 3.0, "std": pytest.approx(np.sqrt(2)), "ci95": pytest.approx(12.706), "never": 1}
+    assert aggregate(np.arange(100.0))["ci95"] == pytest.approx(1.96 * np.std(np.arange(100.0), ddof=1) / 10)
     assert aggregate([np.inf, np.inf])["mean"] is None
 
 

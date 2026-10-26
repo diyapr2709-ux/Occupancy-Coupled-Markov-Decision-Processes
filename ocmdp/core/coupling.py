@@ -40,6 +40,13 @@ class CrossResistanceCoupling:
 
     __call__ = selection_pressure
 
+    def identical_row_classes(self) -> list[tuple[int, ...]]:
+        """Drugs grouped by identical cross-resistance rows: interchangeable as far as the dynamics can tell."""
+        classes: dict[bytes, list[int]] = {}
+        for drug, row in enumerate(self.matrix):
+            classes.setdefault(row.tobytes(), []).append(drug)
+        return [tuple(c) for c in classes.values()]
+
     def mechanism_assignment(self) -> np.ndarray:
         """Row-normalised C: the ground-truth drug -> mechanism map a learned embedding psi should recover."""
         return self.matrix / self.matrix.sum(axis=1, keepdims=True)

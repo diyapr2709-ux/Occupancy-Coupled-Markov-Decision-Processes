@@ -4,20 +4,12 @@ import numpy as np
 import pytest
 
 from ocmdp.eval.metrics import (
-    effective_dimensionality,
     entropy,
     expected_failure_rate,
     pushforward_occupancy_entropy,
     time_to_fixation,
 )
 from ocmdp.eval.rollout import EpisodeLog
-
-
-def test_effective_dimensionality_detects_collapse():
-    rng = np.random.default_rng(0)
-    assert effective_dimensionality(rng.normal(size=(500, 8))) > 6.5
-    assert math.isclose(effective_dimensionality(np.outer(rng.normal(size=50), rng.normal(size=8))), 1.0)
-    assert effective_dimensionality(np.ones((5, 3))) == 0.0
 
 
 def test_time_to_fixation():

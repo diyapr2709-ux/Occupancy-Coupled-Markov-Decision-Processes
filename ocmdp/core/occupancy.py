@@ -69,11 +69,6 @@ class OccupancyMeasure:
         """Distributions recorded but not yet visible to the kernel, oldest first."""
         return [d.copy() for d in self._pending]
 
-    @property
-    def effective_horizon(self) -> float:
-        """Mean age, in periods, of the history mu is built from (excluding the delay)."""
-        return 1.0 / (1.0 - self.lam)
-
     def _check(self, d: np.ndarray) -> np.ndarray:
         d = np.asarray(d, dtype=np.float64)
         if d.shape != (self.n_actions,):

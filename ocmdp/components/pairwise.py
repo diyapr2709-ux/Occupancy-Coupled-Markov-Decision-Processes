@@ -1,9 +1,12 @@
-"""Shared trunk for C3 and C4: score every (state, embedded action) pair with one MLP.
+"""Shared trunk for the policy head and the reserve critic: score every (state, embedded action) pair with one MLP.
 
-Scoring pairs rather than emitting one output per action index makes both heads
-permutation-equivariant over the drug panel and ties their outputs to the embedding:
-drugs at the same point of psi always get the same score, so a policy can only tell
-cross-resistant drugs apart if C2 does.
+Scoring pairs rather than emitting one output per action index ties each output to its
+drug's embedding. Permuting the embeddings with the state held fixed permutes the
+outputs, and drugs at the same point of the embedding always get the same score.
+
+The full network is equivariant to relabelling the drug panel only when the state
+carries no drug index, e.g. under ocmdp.envs.wrappers.MechanismObservation. The state
+encoder is a plain MLP, so drug-indexed observation blocks break the symmetry.
 """
 
 import torch

@@ -108,6 +108,9 @@ def test_oracle_runs_on_fuzzed_configs_without_violations():
         {"resistance_noise": -0.1},
         {"resistance_noise": float("nan")},
         {"resistance_noise": float("inf")},
+        {"r0_spread": -0.1},
+        {"mu0_spread": 1.5},
+        {"mu0_spread": float("nan")},
         {"mu0": (0.5, 0.6)},
         {"mu0": (1.0,)},
         {"cross_resistance": ((float("nan"), 1.0), (0.0, 1.0))},
@@ -201,8 +204,7 @@ def test_deepcopied_and_pickled_envs_continue_identically():
             assert got[1:4] == expected[1:4]
 
 
-def test_scales_to_the_proposal_action_set():
-    """Around twenty classes and a handful of mechanisms, as in Section 4 of the proposal."""
+def test_scales_to_twenty_drugs_and_five_mechanisms():
     rng = np.random.default_rng(0)
     C = (rng.random((20, 5)) < 0.3) * rng.uniform(0.3, 1.0, (20, 5))
     C[np.arange(20), np.arange(20) % 5] = 1.0

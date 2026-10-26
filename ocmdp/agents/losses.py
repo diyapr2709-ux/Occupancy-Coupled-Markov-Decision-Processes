@@ -5,7 +5,7 @@ CleanRL's discrete SAC (sac_atari.py) minimises
     (pi * (alpha * log pi - min_q)).sum(-1).mean()
 
 with a scalar alpha. Here entropy is taken on psi#pi instead of pi, alpha is a function
-of state, and the reserve critic C4 enters with Lagrange multiplier xi, so the actor
+of state, and the reserve critic enters with Lagrange multiplier xi, so the actor
 ascends E_pi[Q] + alpha(s) H(psi#pi) - xi E_pi[Q_reserve].
 
 The entropy is computed by the caller from the same probs, with either estimator in
@@ -31,9 +31,9 @@ def actor_loss(
     entropy: torch.Tensor,
 ) -> torch.Tensor:
     """
-    probs:     (B, A) policy after the C5 constraint filter
+    probs:     (B, A) policy after the constraint filter
     q_values:  (B, A) min of the twin reward critics
-    reserve_q: (B, A) C4 estimate of discounted option-value loss (higher is worse)
+    reserve_q: (B, A) reserve-critic estimate of discounted option-value loss (higher is worse)
     alpha:     (B,) state-dependent temperature; treated as a constant here
     xi:        dual variable; treated as a constant here
     entropy:   (B,) H(psi#pi), computed from `probs` so that it carries their gradient
@@ -57,7 +57,7 @@ def entropy_target(
 ) -> torch.Tensor:
     """Target for H(psi#pi) that rises from h_low to h_high as the most prevalent mechanism nears fixation.
 
-    resistance: (B, M) estimated mechanism frequencies (C1 belief mean).
+    resistance: (B, M) estimated mechanism frequencies.
     """
     closeness = torch.sigmoid(sharpness * (resistance.max(dim=-1).values - threshold))
     return h_low + (h_high - h_low) * closeness
