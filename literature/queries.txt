@@ -1,0 +1,16 @@
+# prior art that could threaten novelty - run this group first, thoroughly
+(abs:"performative" AND cat:cs.LG) ANDNOT ti:survey
+abs:"occupancy measure" AND abs:"transition kernel"
+abs:"policy-dependent dynamics" OR abs:"policy-induced drift"
+abs:"performative" AND (abs:"delayed" OR abs:"history-dependent")
+abs:"entropy regularization" AND (abs:"action abstraction" OR abs:"equivalence classes")
+abs:"similarity-sensitive" AND abs:"entropy" AND cat:cs.LG
+
+# baselines and method comparators
+abs:"maximum entropy" AND abs:"soft actor-critic" AND cat:cs.LG
+abs:"constrained reinforcement learning" AND abs:"Lagrangian"
+
+# the application, where a competing method would appear
+abs:"antibiotic" AND (abs:"reinforcement learning" OR abs:"drug cycling")
+abs:"antimicrobial resistance" AND abs:"sequential treatment"
+abs:"collateral sensitivity" AND abs:"reinforcement learning"

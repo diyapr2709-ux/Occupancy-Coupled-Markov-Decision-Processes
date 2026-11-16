@@ -1,0 +1,69 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(.venv/bin/python experiments/*)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Read(runs/**)",
+      "Read(preregistrations/**)",
+      "Edit(experiments/**)",
+      "Edit(ocmdp/agents/**)",
+      "Edit(ocmdp/objectives/**)",
+      "Edit(ocmdp/components/**)",
+      "Edit(tests/**)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:*.arxiv.org)",
+      "WebFetch(domain:api.semanticscholar.org)",
+      "WebFetch(domain:api2.openreview.net)"
+    ],
+    "deny": [
+      "Edit(runs/**)",
+      "Edit(approvals/**)",
+      "Bash(touch approvals*)",
+      "Edit(seeds.yaml)",
+      "Edit(budget.yaml)",
+      "Edit(ocmdp/eval/**)",
+      "Edit(ocmdp/envs/**)",
+      "Edit(ocmdp/core/**)",
+      "Edit(.claude/**)",
+      "Edit(CLAUDE.md)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Bash(git rebase *)",
+      "Read(//Users/**/.ssh/**)"
+    ],
+    "ask": [
+      "Edit(ocmdp/baselines/**)",
+      "Edit(ocmdp/theory/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-tier.sh", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-frozen.sh", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/require-manifest.sh", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

@@ -227,3 +227,66 @@ def test_validate_cli_writes_a_complete_report(tmp_path):
     checks = {c["name"]: c["status"] for c in json.loads(report.read_text())["verification"]}
     assert set(checks) == set(VERIFICATION)
     assert "fail" not in checks.values()
+
+
+def _train_cli(*args, timeout=300):
+    return subprocess.run([sys.executable, "experiments/train_agent.py", *args], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+
+
+def test_training_env_observes_the_pending_occupancy():
+    sys.path.insert(0, str(ROOT))
+    try:
+        from experiments.train_agent import make_env
+    finally:
+        sys.path.remove(str(ROOT))
+    env = make_env(0.0)
+    toy = env.unwrapped
+    delay, n_mech, per_quarter = toy.config.delay, toy.coupling.n_mechanisms, toy.config.decisions_per_quarter
+    assert toy.config.markov_observation and delay >= 1
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (2 * n_mech + 1 + n_mech * (1 + delay),)
+    np.testing.assert_array_equal(obs[-delay * n_mech :], 0.0)  # nothing prescribed yet
+    for _ in range(per_quarter):
+        obs, *_ = env.step(0)
+    # the quarter just closed is not yet in the occupancy the kernel sees, so it must be in the observation
+    np.testing.assert_allclose(obs[-n_mech:], toy.coupling.matrix[0])
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        ([], "--tier"),
+        (["--tier", "dev", "--seeds", "100"], "inside the dev tier"),
+        (["--tier", "val", "--seeds", "100", "100"], "distinct"),
+        (["--tier", "dev", "--episodes", "101"], "--episodes"),
+        (["--tier", "test", "--seeds", "1000"], "--prereg"),
+        (["--tier", "test", "--seeds", "1000", "--prereg", "preregistrations/missing.yaml"], "--prereg"),
+    ],
+)
+def test_train_cli_rejects_runs_outside_the_seed_protocol(args, message, tmp_path):
+    result = _train_cli(*args, "--out", str(tmp_path))
+    assert result.returncode == 2 and message in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
+def test_train_cli_rejects_overlapping_tiers(tmp_path):
+    seeds_file = tmp_path / "seeds.yaml"
+    seeds_file.write_text("dev: [0, 99]\nval: [50, 199]\ntest: [1000, 1099]\n")
+    result = _train_cli("--tier", "dev", "--seeds-file", str(seeds_file), "--out", str(tmp_path / "out"))
+    assert result.returncode == 2 and "overlap" in result.stderr
+
+
+def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
+    small = ["--sigmas", "0.0", "--quarters", "200", "--episodes", "2", "--workers", "2",
+             "--set", "learning_starts=64", "batch_size=32", "hidden_dim=16", "dual_update_every=40"]  # fmt: skip
+    result = _train_cli("--tier", "val", "--seeds", "100", *small, "--out", str(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    (path,) = tmp_path.glob("train_*.json")
+    report = json.loads(path.read_text())
+    assert report["args"]["tier"] == "val" and report["args"]["seeds"] == [100]
+    assert report["evaluation_episode_seeds"] == [10_100, 10_101]
+    assert set(report["git"]) == {"commit", "dirty"}
+    assert report["instance"]["markov_observation"] is True and "resistance_noise" not in report["instance"]
+    targets = report["entropy_target_nats"]
+    assert targets["oc-sac"] == pytest.approx([0.05 * math.log(2)] * 2) and targets["sac"] == pytest.approx([0.05 * math.log(4)] * 2)
+    assert {r["variant"] for r in report["runs"]} == {"oc-sac", "sac"}

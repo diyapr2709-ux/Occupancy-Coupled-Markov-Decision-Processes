@@ -1,0 +1,26 @@
+{
+  "args": {
+    "mechanisms": 5,
+    "drugs_per_mechanism": 4,
+    "steps": 200,
+    "random_starts": 4,
+    "planner_seeds": 5,
+    "out": "runs/planner"
+  },
+  "git": {
+    "commit": "edf3633c8425dc3acb2b864bcd654bcb774adfd5",
+    "dirty": true
+  },
+  "n_drugs": 20,
+  "uniform": 0.2061495943350568,
+  "best_rotation": 0.13702901444170199,
+  "planned_failure_rate": [
+    0.135680100473,
+    0.13684258251849196,
+    0.1345391537546999,
+    0.13410107671183874,
+    0.1347143207757131
+  ],
+  "spread": 0.0027415058066532216,
+  "spread_share_of_gain_over_uniform": 0.038050828762225014
+}

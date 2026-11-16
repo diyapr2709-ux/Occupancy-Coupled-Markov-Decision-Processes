@@ -15,7 +15,8 @@ python3 -m venv .venv
 .venv/bin/python -m pytest
 .venv/bin/python experiments/validate.py --quick   # V&V harness, two seeds
 .venv/bin/python experiments/validate.py           # full seed protocol (about 10 minutes)
-.venv/bin/python experiments/train_agent.py        # train and compare agents (about 15 minutes on 10 cores)
+.venv/bin/python experiments/train_agent.py --tier dev   # train and compare agents (about 15 minutes on 10 cores)
+.venv/bin/python experiments/planner_restarts.py   # how far the oracle's plan moves with its random starts
 ```
 
 ## Layout
@@ -43,6 +44,9 @@ python3 -m venv .venv
 | `ocmdp/eval/` | Rollout logging, metrics, seed protocol, V&V harness |
 | `experiments/validate.py` | Runs the harness and writes a JSON report to `runs/vv/` |
 | `experiments/train_agent.py` | Trains OC-SAC and standard SAC across seeds and compares them with the baselines; writes `runs/train/` |
+| `experiments/planner_restarts.py` | Spread of the oracle's planned failure rate over planner seeds; writes `runs/planner/` |
+| `seeds.yaml` | The dev, val and test seed tiers |
+| `budget.yaml` | Daily limit on launched experiment commands |
 
 ## Environment contract
 
@@ -135,6 +139,8 @@ Expected failure rate (mean ± 95% interval over training seeds):
 
 ## Seed protocol
 
-`ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)`.
-- **Training and evaluation seeds.** Validation episodes run on evaluation seeds offset by 10 000. The noise study uses 20 seeds, because its paired differences have a standard deviation of about 0.07 at σ = 0.4.
+`ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)` is the harness protocol. The noise study uses 20 seeds, because its paired differences have a standard deviation of about 0.07 at σ = 0.4.
+- **Tiers.** `seeds.yaml` splits training seeds into three disjoint ranges: dev (0–99) for exploration, val (100–199) for choosing hyperparameters, test (1000–1099) for the single confirmatory run of a preregistration. `experiments/train_agent.py --tier` rejects seeds outside the tier.
+- **Evaluation episodes follow the tier.** A run is evaluated on episodes `10 000 + first seed of the tier + e`, so val and test episodes are never seen by a dev run. A test-tier run also needs `--prereg`.
+- **Run reports.** Each report under `runs/` records the tier, seeds, evaluation episodes, git commit, instance and entropy targets.
 - **Independent streams.** The environment and the policy draw from independent random streams, so every policy faces the same patients and shocks for a given seed.

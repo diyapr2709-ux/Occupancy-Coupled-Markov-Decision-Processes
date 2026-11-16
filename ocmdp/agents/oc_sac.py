@@ -166,6 +166,9 @@ def train(env: gym.Env, cfg: SACConfig, seed: int) -> TrainResult:
     """Train on `env` (a toy environment, optionally wrapped) for cfg.total_quarters decisions."""
     torch.manual_seed(seed)
     toy = env.unwrapped
+    if not toy.config.markov_observation:
+        # without the pending occupancy the critics are fitted to a state that does not determine the next one
+        raise ValueError("train needs an environment with markov_observation=True")
     n_mech = toy.coupling.n_mechanisms
     agent = Agent(
         env.observation_space.shape[0],

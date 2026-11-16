@@ -78,3 +78,9 @@ def test_divergence_is_reported_not_propagated():
 
 def test_myopic_greedy_gives_the_lowest_failure_drug_and_splits_ties():
     np.testing.assert_allclose(MyopicGreedy().probs(None, {"fail_prob": np.array([0.3, 0.1, 0.1, 0.4])}), [0, 0.5, 0.5, 0])
+
+
+def test_training_rejects_an_observation_without_the_pending_occupancy():
+    cfg = ToyConfig.paired(horizon_quarters=6, decisions_per_quarter=3, expected_reward=True)
+    with pytest.raises(ValueError, match="markov_observation"):
+        train(MechanismObservation(ToyOCMDPEnv(cfg)), TINY, seed=0)

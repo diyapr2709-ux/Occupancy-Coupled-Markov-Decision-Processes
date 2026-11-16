@@ -1,0 +1,5 @@
+# Daily limits read by .claude/hooks/guard-tier.sh. One run is one launched experiment command.
+per_day:
+  max_training_runs: 40
+  max_usd_headless: 10
+confirmatory_runs_per_prereg: 1
