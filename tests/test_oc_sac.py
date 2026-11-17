@@ -11,6 +11,7 @@ from ocmdp.baselines.heuristics import MyopicGreedy
 from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
 from ocmdp.envs.wrappers import MechanismObservation
 from ocmdp.eval.rollout import rollout
+from ocmdp.objectives.pushforward_entropy import within_class_entropy
 
 TINY = SACConfig(total_quarters=240, learning_starts=48, batch_size=32, hidden_dim=16, dual_update_every=40)
 
@@ -124,3 +125,29 @@ def test_training_rejects_an_observation_without_the_pending_occupancy():
     cfg = ToyConfig.paired(horizon_quarters=6, decisions_per_quarter=3, expected_reward=True)
     with pytest.raises(ValueError, match="markov_observation"):
         train(MechanismObservation(ToyOCMDPEnv(cfg)), TINY, seed=0)
+
+
+@pytest.mark.parametrize("class_sizes", [(2, 2), (3, 1)])
+def test_drugs_sharing_a_mechanism_are_indistinguishable_to_the_networks(class_sizes):
+    # The actor and critics score a drug through its row of C, and MechanismObservation maps prescribing through C,
+    # so drugs with the same row get the same probability and value from any weights. The entropy a policy spends
+    # inside a class is therefore pinned at its maximum, sum_j q_j log n_j, whatever the entropy bonus is taken on.
+    rows = tuple(tuple(float(j == m) for j in range(len(class_sizes))) for m, n in enumerate(class_sizes) for _ in range(n))
+    env = MechanismObservation(ToyOCMDPEnv(ToyConfig(cross_resistance=rows, markov_observation=True, expected_reward=True)))
+    toy = env.unwrapped
+    obs, info = env.reset(seed=0)
+    for drug in range(toy.action_space.n):
+        obs, *_ = env.step(drug)
+    torch.manual_seed(0)
+    agent = Agent(obs.shape[0], torch.tensor(toy.coupling.matrix, dtype=torch.float32), torch.tensor(toy.coupling.mechanism_assignment(), dtype=torch.float32), toy.coupling.n_mechanisms, TINY)
+    with torch.no_grad():
+        for p in agent.parameters():
+            p.add_(torch.randn_like(p))
+        probs, _ = agent.policy(torch.as_tensor(obs)[None])
+        q = agent.q(torch.as_tensor(obs)[None])
+    classes = toy.coupling.identical_row_classes()
+    for members in classes:
+        assert torch.equal(probs[0, list(members)], probs[0, members[0]].expand(len(members)))
+        assert torch.equal(q[0, list(members)], q[0, members[0]].expand(len(members)))
+    pinned = sum(probs[0, list(c)].sum() * math.log(len(c)) for c in classes)
+    assert within_class_entropy(probs[0], classes).item() == pytest.approx(pinned.item(), abs=1e-6)
