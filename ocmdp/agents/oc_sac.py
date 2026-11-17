@@ -124,10 +124,14 @@ class Agent(nn.Module):
         q1, q2 = (self.q1_target, self.q2_target) if target else (self.q1, self.q2)
         return torch.minimum(q1(obs, self.embeddings)[0], q2(obs, self.embeddings)[0])
 
-    def choose(self, obs: np.ndarray, rng: np.random.Generator, greedy: bool = False) -> int:
+    def probs(self, obs: np.ndarray) -> np.ndarray:
+        """Policy over drugs at one observation."""
         with torch.no_grad():
             probs, _ = self.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
-        p = probs[0].double().numpy()
+        return probs[0].double().numpy()
+
+    def choose(self, obs: np.ndarray, rng: np.random.Generator, greedy: bool = False) -> int:
+        p = self.probs(obs)
         if greedy:
             return int(p.argmax())
         return int(rng.choice(len(p), p=p / p.sum()))

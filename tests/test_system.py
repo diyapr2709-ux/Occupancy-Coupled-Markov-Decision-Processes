@@ -7,6 +7,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
@@ -233,13 +234,17 @@ def _train_cli(*args, timeout=300):
     return subprocess.run([sys.executable, "experiments/train_agent.py", *args], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
 
 
-def test_training_env_observes_the_pending_occupancy():
+def _training_script():
     sys.path.insert(0, str(ROOT))
     try:
-        from experiments.train_agent import make_env
+        from experiments import train_agent
     finally:
         sys.path.remove(str(ROOT))
-    env = make_env(0.0)
+    return train_agent
+
+
+def test_training_env_observes_the_pending_occupancy():
+    env = _training_script().make_env(0.0)
     toy = env.unwrapped
     delay, n_mech, per_quarter = toy.config.delay, toy.coupling.n_mechanisms, toy.config.decisions_per_quarter
     assert toy.config.markov_observation and delay >= 1
@@ -252,6 +257,25 @@ def test_training_env_observes_the_pending_occupancy():
     np.testing.assert_allclose(obs[-n_mech:], toy.coupling.matrix[0])
 
 
+def test_soft_returns_discount_later_rewards_and_entropy_bonuses_and_stop_at_the_horizon():
+    reward, bonus = np.array([[1.0, 2.0, 3.0]]), np.array([[9.0, 0.5, 0.25]])
+    # the bonus of the deciding quarter itself is not part of the value of the drug chosen there
+    np.testing.assert_allclose(_training_script().soft_returns(reward, bonus, 0.5), [[3.0625, 3.625, 3.0]])
+
+
+def test_quarterly_and_discounted_failure_follow_the_drugs_given():
+    script = _training_script()
+    log = SimpleNamespace(
+        fail_prob=np.array([[0.1, 0.5], [0.2, 0.6], [0.9, 0.9]]),
+        decision_quarter=np.array([0, 0, 1, 1]),
+        actions=np.array([0, 1, 1, 1]),
+    )
+    failure = script.quarterly_failure(log)
+    np.testing.assert_allclose(failure, [0.3, 0.6])
+    assert script.discounted_failure_rate(failure, 1.0) == pytest.approx(0.45)
+    assert script.discounted_failure_rate(failure, 0.5) == pytest.approx((0.3 + 0.5 * 0.6) / 1.5)
+
+
 @pytest.mark.parametrize(
     "args, message",
     [
@@ -261,6 +285,8 @@ def test_training_env_observes_the_pending_occupancy():
         (["--tier", "dev", "--episodes", "101"], "--episodes"),
         (["--tier", "test", "--seeds", "1000"], "--prereg"),
         (["--tier", "test", "--seeds", "1000", "--prereg", "preregistrations/missing.yaml"], "--prereg"),
+        (["--tier", "dev", "--class-sizes", "4"], "--class-sizes"),
+        (["--tier", "dev", "--class-sizes", "3", "0"], "--class-sizes"),
     ],
 )
 def test_train_cli_rejects_runs_outside_the_seed_protocol(args, message, tmp_path):
@@ -290,3 +316,30 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     targets = report["entropy_target_nats"]
     assert targets["oc-sac"] == pytest.approx([0.05 * math.log(2)] * 2) and targets["sac"] == pytest.approx([0.05 * math.log(4)] * 2)
     assert {r["variant"] for r in report["runs"]} == {"oc-sac", "sac"}
+    assert report["class_structure"] == {"class_sizes": [2, 2], "imbalance_kl_nats": pytest.approx(0.0, abs=1e-12)}
+    assert report["instance"]["cross_resistance"] == [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+
+def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them(tmp_path):
+    small = ["--sigmas", "0.0", "--quarters", "200", "--episodes", "2", "--workers", "2",
+             "--set", "learning_starts=64", "batch_size=32", "hidden_dim=16", "dual_update_every=40"]  # fmt: skip
+    result = _train_cli("--tier", "dev", "--seeds", "0", "--class-sizes", "3", "1", *small, "--out", str(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    (path,) = tmp_path.glob("train_*.json")
+    report = json.loads(path.read_text())
+    assert report["instance"]["cross_resistance"] == [[1.0, 0.0]] * 3 + [[0.0, 1.0]]
+    kl = math.log(2) + 0.75 * math.log(0.75) + 0.25 * math.log(0.25)
+    assert report["class_structure"] == {"class_sizes": [3, 1], "imbalance_kl_nats": pytest.approx(kl)}
+    targets = report["entropy_target_nats"]
+    assert targets["oc-sac"] == pytest.approx([0.05 * math.log(2)] * 2) and targets["sac"] == pytest.approx([0.05 * math.log(4)] * 2)
+    for run in report["runs"]:
+        spent = run["policy_entropy"]
+        assert 0.0 <= spent["within_class"] <= min(spent["action"], 0.75 * math.log(3)) + 1e-6
+    summary = report["summary"]["0.0"]
+    for variant in ("oc-sac", "sac"):
+        assert set(summary[variant]["policy_entropy"]) == {"action", "within_class"}
+        assert all(math.isfinite(summary[variant]["critic"][k]) for k in ("bias", "rmse", "return_sd", "correlation"))
+    assert set(summary["discounted_failure_rate"]) == set(summary["baselines"]) | {"oc-sac", "sac"}
+    for run in report["runs"]:
+        assert len(run["discounted_failure_rate"]) == len(run["expected_failure_rate"]) == 2
+        assert run["critic"]["rmse"] >= abs(run["critic"]["bias"])

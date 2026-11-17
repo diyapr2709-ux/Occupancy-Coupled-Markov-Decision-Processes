@@ -1,9 +1,11 @@
+import copy
 import math
 
 import numpy as np
 import pytest
 import torch
 
+from ocmdp.agents import oc_sac
 from ocmdp.agents.oc_sac import Agent, QuarterlyChoicePolicy, SACConfig, _check_finite, train
 from ocmdp.baselines.heuristics import MyopicGreedy
 from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
@@ -52,6 +54,44 @@ def test_entropy_modes_train_different_policies():
     assert push.entropy(probs).item() == pytest.approx(0.0, abs=1e-6)  # one mechanism
     assert action.entropy(probs).item() == pytest.approx(math.log(2))
     assert push.max_entropy == pytest.approx(math.log(2)) and action.max_entropy == pytest.approx(math.log(4))
+
+
+def test_entropy_modes_share_initial_weights_reset_seeds_and_replay_order(monkeypatch):
+    original_sample, original_update = oc_sac._Replay.sample, oc_sac._update
+
+    def trace(entropy):
+        resets, draws, initial = [], [], []
+        env = tiny_env()
+        env_reset = env.reset
+
+        def reset(**kwargs):
+            resets.append(kwargs["seed"])
+            return env_reset(**kwargs)
+
+        def sample(replay, n, rng):
+            draws.append(copy.deepcopy(rng).integers(replay.size, size=n).tolist())
+            return original_sample(replay, n, rng)
+
+        def update(agent, *args):
+            if not initial:  # nothing has been optimised before the first update
+                initial.extend(p.clone() for p in agent.parameters())
+            return original_update(agent, *args)
+
+        monkeypatch.setattr(env, "reset", reset)
+        monkeypatch.setattr(oc_sac._Replay, "sample", sample)
+        monkeypatch.setattr(oc_sac, "_update", update)
+        trained = train(env, SACConfig(**{**vars(TINY), "entropy": entropy}), seed=5).agent
+        return resets, draws, initial, trained
+
+    push_resets, push_draws, push_initial, push = trace("pushforward")
+    action_resets, action_draws, action_initial, action = trace("action")
+    assert push_resets == action_resets and len(set(push_resets)) == len(push_resets) == 40
+    assert push_draws == action_draws and len(push_draws) == TINY.total_quarters - TINY.learning_starts + 1
+    assert len(push_initial) == len(action_initial) > 0
+    for p, q in zip(push_initial, action_initial):
+        assert torch.equal(p, q)
+    # the shared streams are not an artefact of two identical runs: the trained policies differ
+    assert any(not torch.equal(p, q) for p, q in zip(push.actor.parameters(), action.actor.parameters()))
 
 
 def test_agent_policy_is_a_distribution_and_alpha_starts_at_alpha_init():

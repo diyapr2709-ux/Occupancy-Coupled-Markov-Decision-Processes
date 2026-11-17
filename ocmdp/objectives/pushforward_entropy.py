@@ -17,7 +17,16 @@ H_Z has no clusters and no K. It reduces to Shannon entropy when Z = I. When Z =
 for a hard assignment S, it equals the cluster form exactly: (Z pi)_a is the mass of
 a's cluster, so the sum regroups into -sum_k q_k log q_k. A drug duplicated at the same
 embedding adds no diversity however the mass is split.
+
+Any partition of the actions splits the action entropy by the chain rule,
+
+    H(pi) = H(q) + sum_j q_j H(pi | class j),    q_j = mass of class j,
+
+and the second term is what an action-entropy bonus rewards and a pushforward bonus
+does not: spreading inside a class of interchangeable actions.
 """
+
+from collections.abc import Sequence
 
 import torch
 
@@ -45,6 +54,18 @@ def categorical_entropy(probs: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
 
 def pushforward_entropy(probs: torch.Tensor, assignment: torch.Tensor) -> torch.Tensor:
     return categorical_entropy(pushforward(probs, assignment))
+
+
+def within_class_entropy(probs: torch.Tensor, classes: Sequence[Sequence[int]]) -> torch.Tensor:
+    """(..., A) action distribution -> (...) entropy spent inside the classes, sum_j q_j H(pi | class j).
+
+    `classes` partitions the actions. Zero when each class's mass sits on one action.
+    """
+    members = sorted(a for c in classes for a in c)
+    if members != list(range(probs.shape[-1])):
+        raise ValueError("classes must partition the actions")
+    masses = torch.stack([probs[..., list(c)].sum(dim=-1) for c in classes], dim=-1)
+    return categorical_entropy(probs) - categorical_entropy(masses)
 
 
 def similarity_kernel(embeddings: torch.Tensor, bandwidth: float = 1.0) -> torch.Tensor:

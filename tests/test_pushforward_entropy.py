@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from ocmdp.objectives.pushforward_entropy import (
@@ -8,6 +9,7 @@ from ocmdp.objectives.pushforward_entropy import (
     similarity_kernel,
     similarity_sensitive_entropy,
     soft_assignment,
+    within_class_entropy,
 )
 
 PAIRED = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
@@ -72,3 +74,21 @@ def test_similarity_entropy_gradient_reaches_embeddings():
     probs = torch.softmax(torch.randn(8, 5), dim=-1)
     similarity_sensitive_entropy(probs, similarity_kernel(psi)).sum().backward()
     assert torch.isfinite(psi.grad).all() and psi.grad.abs().sum() > 0
+
+
+def test_within_class_entropy_is_the_chain_rule_remainder():
+    classes = [(0, 1, 2), (3,)]
+    uniform = torch.full((4,), 0.25)
+    assert within_class_entropy(uniform, classes).item() == pytest.approx(0.75 * math.log(3))  # sum_j q_j H(pi | class j)
+    concentrated = torch.tensor([[0.6, 0.0, 0.0, 0.4], [0.0, 1.0, 0.0, 0.0]])
+    torch.testing.assert_close(within_class_entropy(concentrated, classes), torch.zeros(2), atol=1e-6, rtol=0)
+    hard = torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    probs = torch.tensor([0.5, 0.2, 0.1, 0.2])
+    split = categorical_entropy(probs) - pushforward_entropy(probs, hard)
+    assert within_class_entropy(probs, classes).item() == pytest.approx(split.item(), abs=1e-6)
+
+
+@pytest.mark.parametrize("classes", [[(0, 1), (1, 2, 3)], [(0, 1), (2,)], [(0, 1), (2, 3, 4)]])
+def test_within_class_entropy_rejects_classes_that_do_not_partition_the_actions(classes):
+    with pytest.raises(ValueError, match="partition"):
+        within_class_entropy(torch.full((4,), 0.25), classes)
