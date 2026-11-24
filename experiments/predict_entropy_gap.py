@@ -104,7 +104,7 @@ def predict(class_sizes: tuple[int, ...], alphas: dict[str, float], gamma: float
 
 def temperatures_from_report(path: Path) -> tuple[tuple[int, ...], dict[str, float], float, float]:
     """Class sizes, each variant's median evaluation temperature averaged over seeds, gamma and reward scale."""
-    report = json.loads(path.read_text())
+    report = json.loads(path.read_text(encoding="utf-8"))
     variant_mode = {"oc-sac": "class entropy", "sac": "drug entropy"}
     alphas = {}
     for variant, mode in variant_mode.items():
@@ -157,7 +157,7 @@ def main() -> int:
         "predictions": predictions,
     }
     path = args.out / f"predict_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
-    path.write_text(json.dumps(report, indent=2))
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"Class sizes {list(sizes)}: predicted expected failure rate of each soft-optimal schedule")
     for p in predictions:
         a = p["alphas"]

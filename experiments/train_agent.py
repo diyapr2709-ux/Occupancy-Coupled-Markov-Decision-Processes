@@ -3,7 +3,7 @@
     python experiments/train_agent.py --tier dev                 # 5 seeds x 2 variants x 2 noise levels, in parallel
     python experiments/train_agent.py --tier dev --seeds 0 1 --workers 4
     python experiments/train_agent.py --tier dev --backend modal   # one Modal container per job
-    python experiments/train_agent.py --tier val --set entropy_low=0.05 entropy_high=0.05   # hyperparameter selection
+    python experiments/train_agent.py --tier val --set target_fraction=0.77   # hyperparameter selection
     python experiments/train_agent.py --tier dev --class-sizes 8 5 4 2 1   # 20 drugs in 5 unequal mechanism classes
     python experiments/train_agent.py --tier test --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
 
@@ -33,7 +33,6 @@ import argparse
 import copy
 import hashlib
 import json
-import math
 import os
 import platform
 import re
@@ -78,7 +77,7 @@ def imbalance_kl(class_sizes: tuple[int, ...]) -> float:
 
 def load_tiers(path: Path) -> dict[str, range]:
     """Read `tier: [first, last]` lines (inclusive) into seed ranges; the three tiers must be present and disjoint."""
-    found = re.findall(r"^(\w+):\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", path.read_text(), re.M)
+    found = re.findall(r"^(\w+):\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", path.read_text(encoding="utf-8"), re.M)
     tiers = {name: range(int(first), int(last) + 1) for name, first, last in found}
     if set(tiers) != set(TIERS) or len(found) != len(TIERS) or any(len(r) == 0 for r in tiers.values()):
         raise ValueError(f"{path} must define a non-empty [first, last] range for each of {', '.join(TIERS)}, once")
@@ -217,8 +216,8 @@ def _continuation_return(snapshot, drug: int, agent, mask_rng: np.random.Generat
         quarter = info["quarter"]
         if not done:
             with torch.no_grad():
-                probs, log_alpha = agent.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
-                bonuses.append(float(log_alpha.clamp(*cfg.log_alpha_range).exp()[0] * agent.entropy(probs)[0]))
+                probs = agent.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
+                bonuses.append(float(agent.temperature() * agent.entropy(probs)[0]))
             drug = int(probs[0].argmax())
     return float(soft_returns(np.array([rewards]), np.array([bonuses]), cfg.gamma)[0, 0])
 
@@ -245,7 +244,7 @@ def _critic_check(agent, snapshots: list, observations: np.ndarray, classes: lis
     obs = torch.as_tensor(observations)
     with torch.no_grad():
         critic = agent.q(obs)[:, representatives].double().numpy()
-        probs, _ = agent.policy(obs)
+        probs = agent.policy(obs)
     actor = np.stack([probs[:, list(c)].sum(-1).double().numpy() for c in classes], axis=-1)
     best = counterfactual.max(axis=1)
     ordered = np.sort(counterfactual, axis=1)
@@ -383,8 +382,7 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, b
     # with noise each counterfactual follows one noise path, which a single draw cannot separate from the critic's error
     critic = _critic_check(agent, snapshots, observations, classes) if sigma == 0 else {}
     gap = _gap_attribution(agent, snapshots, observations, chosen, logs, classes) if diagnose and sigma == 0 else {}
-    with torch.no_grad():
-        alpha_at_evaluation = agent.policy(torch.as_tensor(observations))[1].clamp(*cfg.log_alpha_range).exp().double().numpy()
+    alpha = float(agent.temperature())  # one scalar temperature, the same at every evaluation state
     return {
         "variant": variant,
         "sigma": sigma,
@@ -396,9 +394,11 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, b
         "policy_entropy": _policy_entropy(np.stack([agent.probs(obs) for obs in observations]), env.unwrapped.coupling.identical_row_classes()),
         "critic": critic,
         "gap_attribution": gap,
-        "alpha_path": result.alpha,  # mean alpha(s) over each window of dual_update_every updates
+        "alpha_path": result.alpha,  # mean temperature over each window of dual_update_every updates
         "xi_path": result.xi,
-        "alpha_at_evaluation": {f"q{q}": float(np.percentile(alpha_at_evaluation, q)) for q in (10, 50, 90)},
+        # quantiles over evaluation states, kept so readers of reports from the per-state temperature still apply
+        "alpha_at_evaluation": {f"q{q}": alpha for q in (10, 50, 90)},
+        "entropy_range_nats": {"floor": agent.entropy_floor, "max": agent.entropy_max, "target": agent.entropy_target},
         "argmax": _episode_stats(env, _rollouts(env, argmax, episodes, first_episode), cfg.gamma),
     }
 
@@ -622,7 +622,8 @@ def main() -> int:
     baselines = {result["sigma"]: result["baselines"] for result in baseline_results}
 
     toy = make_env(0.0, *instance).unwrapped
-    max_entropy = {"oc-sac": math.log(toy.coupling.n_mechanisms), "sac": math.log(toy.coupling.n_drugs)}
+    # the range depends only on the instance and the variant, so every run of a variant records the same one
+    entropy_range = {v: next((r["entropy_range_nats"] for r in runs if r["variant"] == v and "entropy_range_nats" in r), None) for v in VARIANTS}
     report = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git": git,
@@ -630,14 +631,14 @@ def main() -> int:
         "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
         "instance": {k: v for k, v in asdict(toy.config).items() if k != "resistance_noise"},
         "class_structure": {"class_sizes": list(sizes), "imbalance_kl_nats": imbalance_kl(sizes)},
-        "entropy_target_nats": {v: [config.entropy_low * h, config.entropy_high * h] for v, h in max_entropy.items()},
+        "entropy_range_nats": entropy_range,
         "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides, **VARIANTS[v]})) for v in VARIANTS},
         "runs": runs,
         "baselines": {str(s): baselines[s] for s in args.sigmas},  # per-episode values, so every contrast can be recomputed
     }
     report["summary"] = {str(s): summarise(runs, baselines[s], s, args.equivalence_margin) for s in args.sigmas}
     path = args.out / f"train_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
-    path.write_text(json.dumps(report, indent=2))
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     for sigma in args.sigmas:
         summary = report["summary"][str(sigma)]

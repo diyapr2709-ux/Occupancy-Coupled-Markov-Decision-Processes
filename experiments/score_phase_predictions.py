@@ -95,7 +95,7 @@ def median_error(lines: dict, means: dict[Line, np.ndarray], predictions: dict[L
 
 
 def load_predictions(path: Path, lines: dict) -> tuple[str, int, dict[Line, tuple[float | None, int]], list[dict]]:
-    spec = json.loads(path.read_text())
+    spec = json.loads(path.read_text(encoding="utf-8"))
     contrast, beyond = spec["contrast"], spec["sign_beyond_crossing"]
     if contrast not in CONTRASTS:
         raise ValueError(f"unknown contrast {contrast!r}; known: {sorted(CONTRASTS)}")
@@ -182,9 +182,9 @@ def main() -> int:
     parser.add_argument("--resamples", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
-    reports = [json.loads(p.read_text()) for p in args.reports]
+    reports = [json.loads(p.read_text(encoding="utf-8")) for p in args.reports]
     try:
-        contrast = json.loads(args.predictions.read_text())["contrast"]
+        contrast = json.loads(args.predictions.read_text(encoding="utf-8"))["contrast"]
         lines, episodes = measured_lines(reports, contrast)
         _, beyond, predictions, directions = load_predictions(args.predictions, lines)
         null = load_predictions(args.null, lines)[2] if args.null else None

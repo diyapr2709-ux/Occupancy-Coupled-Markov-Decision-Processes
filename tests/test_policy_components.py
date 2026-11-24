@@ -14,31 +14,31 @@ from ocmdp.eval.rollout import rollout
 torch.manual_seed(0)
 
 
-def test_policy_head_outputs_a_masked_distribution_and_per_state_temperature():
+def test_policy_head_outputs_a_masked_distribution():
     head = MixingPolicyHead(state_dim=6, embed_dim=3, hidden_dim=32)
     mask = torch.rand(8, 5) < 0.5
     mask[:, 0] = True
-    probs, log_alpha = head(torch.randn(8, 6), torch.randn(5, 3), mask)
+    probs = head(torch.randn(8, 6), torch.randn(5, 3), mask)
+    assert probs.shape == (8, 5)
     torch.testing.assert_close(probs.sum(-1), torch.ones(8))
     assert torch.all(probs[~mask] == 0)
-    assert log_alpha.shape == (8,)
 
 
 def test_policy_head_is_permutation_equivariant_and_ties_identical_embeddings():
     head = MixingPolicyHead(state_dim=4, embed_dim=2, hidden_dim=32)
     state, emb = torch.randn(3, 4), torch.randn(5, 2)
     emb[1] = emb[0]
-    probs, _ = head(state, emb)
+    probs = head(state, emb)
     torch.testing.assert_close(probs[:, 0], probs[:, 1])
     perm = torch.tensor([4, 2, 0, 1, 3])
-    torch.testing.assert_close(head(state, emb[perm])[0], probs[:, perm])
+    torch.testing.assert_close(head(state, emb[perm]), probs[:, perm])
 
 
 def test_policy_head_gradient_reaches_parameters_and_embeddings():
     head = MixingPolicyHead(state_dim=4, embed_dim=2, hidden_dim=16)
     emb = torch.randn(3, 2, requires_grad=True)
-    probs, log_alpha = head(torch.randn(5, 4), emb)
-    (probs[:, 0].sum() + log_alpha.sum()).backward()
+    probs = head(torch.randn(5, 4), emb)
+    probs[:, 0].sum().backward()
     assert emb.grad.abs().sum() > 0
     assert all(p.grad is not None for p in head.parameters())
 

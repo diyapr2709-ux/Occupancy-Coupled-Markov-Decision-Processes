@@ -46,17 +46,32 @@ def test_actor_loss_rejects_shapes_that_would_broadcast(entropy_shape, alpha_sha
         actor_loss(probs, torch.zeros(4, 2), torch.zeros(4, 2), torch.ones(alpha_shape), 0.0, torch.zeros(entropy_shape))
 
 
-def test_temperature_rises_when_entropy_is_below_target():
-    log_alpha = torch.zeros(3, requires_grad=True)
-    temperature_loss(log_alpha, entropy=torch.full((3,), 0.2), target=torch.full((3,), 0.8)).backward()
-    assert torch.all(log_alpha.grad < 0)  # gradient descent increases log alpha
+def _temperature_grad(log_alpha: float, entropy: float, target: float = 0.8, log_alpha_range=(-12.0, 2.0)) -> float:
+    raw = torch.tensor(log_alpha, requires_grad=True)
+    temperature_loss(raw, torch.tensor(entropy), target, log_alpha_range).backward()
+    return raw.grad.item()
 
 
-def test_entropy_target_rises_as_a_mechanism_nears_fixation():
-    r = torch.tensor([[0.05, 0.05], [0.05, 0.45], [0.05, 0.95]])
-    target = entropy_target(r, h_low=0.2, h_high=1.0)
-    assert torch.all(target[1:] > target[:-1])
-    assert 0.2 <= target.min() and target.max() <= 1.0
+def test_temperature_rises_when_entropy_is_below_target_and_falls_when_above():
+    assert _temperature_grad(0.0, entropy=0.2) < 0  # gradient descent increases log alpha
+    assert _temperature_grad(0.0, entropy=1.0) > 0
+
+
+def test_temperature_reflects_at_the_clamp_range():
+    # outside the range, only a gradient that points back inside survives
+    assert _temperature_grad(-13.0, entropy=0.2) < 0  # below the floor and entropy too low: pushed back up
+    assert _temperature_grad(-13.0, entropy=1.0) == 0.0  # below the floor and entropy too high: not pushed further down
+    assert _temperature_grad(3.0, entropy=1.0) > 0  # above the ceiling and entropy too high: pushed back down
+    assert _temperature_grad(3.0, entropy=0.2) == 0.0
+
+
+def test_entropy_target_lies_at_its_fraction_of_the_reachable_range():
+    assert entropy_target(0.5, 1.5, 0.25) == pytest.approx(0.75)
+    for fraction in (0.0, 1.0, -0.1):
+        with pytest.raises(ValueError):
+            entropy_target(0.5, 1.5, fraction)
+    with pytest.raises(ValueError):
+        entropy_target(1.0, 1.0, 0.5)  # no range to regulate
 
 
 def test_dual_variable_moves_on_slow_clock_and_stays_non_negative():

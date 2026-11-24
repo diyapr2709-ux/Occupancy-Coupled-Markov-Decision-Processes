@@ -54,7 +54,9 @@ def test_entropy_modes_train_different_policies():
     probs = torch.tensor([[0.5, 0.5, 0.0, 0.0]])
     assert push.entropy(probs).item() == pytest.approx(0.0, abs=1e-6)  # one mechanism
     assert action.entropy(probs).item() == pytest.approx(math.log(2))
-    assert push.max_entropy == pytest.approx(math.log(2)) and action.max_entropy == pytest.approx(math.log(4))
+    # reachable range under tied pairs: all mass on one mechanism, or one pair, up to uniform
+    assert (push.entropy_floor, push.entropy_max) == pytest.approx((0.0, math.log(2)), abs=1e-9)
+    assert (action.entropy_floor, action.entropy_max) == pytest.approx((math.log(2), math.log(4)), abs=1e-9)
 
 
 def test_entropy_modes_share_initial_weights_reset_seeds_and_replay_order(monkeypatch):
@@ -106,9 +108,9 @@ def test_agent_policy_is_a_distribution_and_alpha_starts_at_alpha_init():
         toy.coupling.n_mechanisms,
         TINY,
     )
-    probs, log_alpha = agent.policy(torch.as_tensor(obs)[None])
+    probs = agent.policy(torch.as_tensor(obs)[None])
     torch.testing.assert_close(probs.sum(-1), torch.ones(1))
-    assert log_alpha.exp().item() == pytest.approx(TINY.alpha_init)
+    assert agent.temperature().item() == pytest.approx(TINY.alpha_init)
     assert 0 <= agent.choose(obs, np.random.default_rng(0)) < 4
 
 
@@ -143,7 +145,7 @@ def test_drugs_sharing_a_mechanism_are_indistinguishable_to_the_networks(class_s
     with torch.no_grad():
         for p in agent.parameters():
             p.add_(torch.randn_like(p))
-        probs, _ = agent.policy(torch.as_tensor(obs)[None])
+        probs = agent.policy(torch.as_tensor(obs)[None])
         q = agent.q(torch.as_tensor(obs)[None])
     classes = toy.coupling.identical_row_classes()
     for members in classes:
