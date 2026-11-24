@@ -1,4 +1,4 @@
 # Seed tiers, inclusive ranges. A tier fixes the training seeds a run may use and the episodes it is evaluated on.
 dev:  [0, 99]
 val:  [100, 199]
-test: [1000, 1099]
+test: [1000, 1299]

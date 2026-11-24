@@ -7,6 +7,12 @@ printf '%s' "$INPUT" | bash "$(dirname "$0")/guard-seeds.sh" || exit $?
 . "$(dirname "$0")/launch.sh" <<<"$INPUT"
 launches_experiment || exit 0
 
+# a custom seed file could relabel the test seeds as dev; launches always use seeds.yaml
+if printf '%s' "$CMD" | grep -qE -- '--seeds-file'; then
+  echo "Blocked: experiment launches use the repository's seeds.yaml; --seeds-file is for tests only." >&2
+  exit 2
+fi
+
 TIER=$(tier_of_command)
 if [ -z "$TIER" ]; then
   echo "Blocked: experiment commands must pass --tier dev, val or test." >&2

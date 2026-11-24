@@ -36,9 +36,9 @@ def test_comparator_table_regret_is_paired_by_seed_and_positive_when_worse():
 def test_aggregate_uses_sample_std_and_counts_only_positive_infinity_as_never():
     agg = aggregate([1.0, 2.0, 3.0, 4.0, 5.0])
     assert agg["std"] == pytest.approx(np.std([1, 2, 3, 4, 5], ddof=1))
-    assert agg["ci95"] == pytest.approx(2.776 * agg["std"] / np.sqrt(5))  # t(0.975, df=4)
-    assert aggregate([np.inf, 2.0, 4.0]) == {"mean": 3.0, "std": pytest.approx(np.sqrt(2)), "ci95": pytest.approx(12.706), "never": 1}
-    assert aggregate(np.arange(100.0))["ci95"] == pytest.approx(1.96 * np.std(np.arange(100.0), ddof=1) / 10)
+    assert agg["ci95"] == pytest.approx(2.776445 * agg["std"] / np.sqrt(5))  # t(0.975, df=4), exact
+    assert aggregate([np.inf, 2.0, 4.0]) == {"mean": 3.0, "std": pytest.approx(np.sqrt(2)), "ci95": pytest.approx(12.706205), "never": 1}
+    assert aggregate(np.arange(100.0))["ci95"] == pytest.approx(1.984217 * np.std(np.arange(100.0), ddof=1) / 10)  # t(0.975, df=99), not 1.96
     assert aggregate([np.inf, np.inf])["mean"] is None
 
 

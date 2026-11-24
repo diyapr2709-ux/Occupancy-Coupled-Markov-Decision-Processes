@@ -38,8 +38,20 @@ drugs, at equal treatment cost.
   one run per preregistration, reported as the result.
 - Agents are compared on paired seeds. Hold identical across the two agents: network
   init seed, environment reset sequence, replay sampling order, evaluation episodes.
-- Entropy targets scale per agent: H_target_OC = c*log(M), H_target_SAC = c*log(K),
-  with one c fixed before test runs. A shared flat target across agents is a bug.
+- Temperature is a per-agent hyperparameter chosen at parity, never one constant scaled
+  per agent. Every entropy-regularised agent is tuned over the same candidate set, on
+  the same val seeds, cells and evaluation episodes, with the same number of runs:
+  fixed temperatures {0, 0.01, 0.03, 0.1, 0.3, 1, 3} in scaled reward per nat, and
+  learned scalar temperatures with target H_floor + c(H_max - H_floor) for c in {0.77,
+  0.89}, where H_floor and H_max are the least and greatest entropy the agent's own
+  policy class can reach in its own entropy space. The fixed set may only be widened,
+  identically for every agent, by the entropy-only rule run on dev. Each agent takes
+  the candidate with the best mean of the preregistration's primary metric over 10 val
+  seeds and its cells, every run counted, with the interquartile mean and the runs that
+  learned reported beside it; the full table and both choices go into the
+  preregistration before any test run. The matched-temperature curve is reported beside
+  the tuned comparison. A learned temperature whose target lies outside (H_floor,
+  H_max) for some agent on some instance, or whose gradient stops at a clamp, is a bug.
 - The planner is an upper bound only at sigma = 0. Under noise, normalise against the
   replanning variant and call the other one the noise-free planner.
 - Floor and ceiling exclusions are fixed before any gap is inspected.
@@ -131,7 +143,9 @@ has not been stood on.
 1. Reproduce a published RL drug-cycling result within a tolerance fixed beforehand.
    This comes before any new method work. If the published numbers cannot be
    reproduced, report the size of the discrepancy and stop; do not tune the
-   reimplementation until it matches.
+   reimplementation until it matches. The planner-only phase-boundary claim uses
+   no learned agent: its preparation runs alongside this rung, and its test-tier
+   launch waits for this rung's verdict, whichever way it goes.
 2. Control: OC-SAC and SAC on that setup unmodified. A tie is the correct result.
 3. Bridge: the published setup plus occupancy coupling. The only rung that compares
    against prior work on shared ground.
