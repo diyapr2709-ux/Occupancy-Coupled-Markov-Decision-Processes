@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.26", "gymnasium>=0.29", "torch>=2.2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+modal = ["modal>=1.6"]  # experiments/train_agent.py --backend modal
 
 [tool.setuptools.packages.find]
 include = ["ocmdp*"]

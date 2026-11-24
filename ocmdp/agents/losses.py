@@ -4,9 +4,9 @@ CleanRL's discrete SAC (sac_atari.py) minimises
 
     (pi * (alpha * log pi - min_q)).sum(-1).mean()
 
-with a scalar alpha. Here entropy is taken on psi#pi instead of pi, alpha is a function
-of state, and the reserve critic enters with Lagrange multiplier xi, so the actor
-ascends E_pi[Q] + alpha(s) H(psi#pi) - xi E_pi[Q_reserve].
+with a scalar alpha. Here entropy may be taken on psi#pi instead of pi, and the reserve
+critic enters with Lagrange multiplier xi, so the actor ascends
+E_pi[Q] + alpha H(psi#pi) - xi E_pi[Q_reserve].
 
 The entropy is computed by the caller from the same probs, with either estimator in
 ocmdp.objectives.pushforward_entropy (cluster or similarity form), so the actor loss
@@ -46,18 +46,26 @@ def actor_loss(
     return (-(expected_q + alpha.detach() * entropy) + xi * expected_reserve).mean()
 
 
-def temperature_loss(log_alpha: torch.Tensor, entropy: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Raises alpha(s) where H(psi#pi) is below its state-dependent target and lowers it where above."""
-    _require_shape(log_alpha.shape, entropy=entropy, target=target)
-    return (log_alpha * (entropy - target).detach()).mean()
+def temperature_loss(log_alpha: torch.Tensor, entropy: torch.Tensor, target: float, log_alpha_range: tuple[float, float]) -> torch.Tensor:
+    """Loss on the raw scalar log alpha: descending it raises alpha when the batch entropy is below target.
 
-
-def entropy_target(
-    resistance: torch.Tensor, h_low: float, h_high: float, threshold: float = 0.5, sharpness: float = 10.0
-) -> torch.Tensor:
-    """Target for H(psi#pi) that rises from h_low to h_high as the most prevalent mechanism nears fixation.
-
-    resistance: (B, M) estimated mechanism frequencies.
+    Reflecting at the clamp range: outside it, only a gradient that points back inside is
+    kept. A clamp applied before the loss would stop the gradient altogether, and a
+    temperature that crossed the lower bound would then stay there.
     """
-    closeness = torch.sigmoid(sharpness * (resistance.max(dim=-1).values - threshold))
-    return h_low + (h_high - h_low) * closeness
+    if log_alpha.ndim != 0 or entropy.ndim != 0:
+        raise ValueError(f"log alpha and the batch entropy must be scalars, got shapes {tuple(log_alpha.shape)} and {tuple(entropy.shape)}")
+    gap = (entropy - target).detach()
+    low, high = log_alpha_range
+    inside = (log_alpha >= low) & (log_alpha <= high)
+    inward = ((log_alpha < low) & (gap < 0)) | ((log_alpha > high) & (gap > 0))
+    return log_alpha * gap * (inside | inward).to(log_alpha.dtype)
+
+
+def entropy_target(floor: float, maximum: float, fraction: float) -> float:
+    """A target strictly inside the range an agent's policy class can reach: floor + fraction (maximum - floor)."""
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(f"the target fraction must lie strictly between 0 and 1, got {fraction}")
+    if not maximum > floor:
+        raise ValueError(f"no entropy range to regulate: floor {floor}, maximum {maximum}")
+    return floor + fraction * (maximum - floor)

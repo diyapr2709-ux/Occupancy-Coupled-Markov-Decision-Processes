@@ -1,6 +1,7 @@
 """System tests: the whole stack end to end, under fuzzed configurations and hostile inputs."""
 
 import copy
+import csv
 import json
 import math
 import pickle
@@ -21,7 +22,7 @@ from ocmdp.baselines.oracle import FullInformationOracle
 from ocmdp.components.constraint_filter import project_probs
 from ocmdp.core.coupling import CrossResistanceCoupling
 from ocmdp.core.occupancy import OccupancyMeasure, scale_effective_horizon
-from ocmdp.core.selection import check_rates
+from ocmdp.core.selection import check_rates, failure_probability
 from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
 from ocmdp.eval.rollout import rollout
 from ocmdp.eval.vv import VERIFICATION
@@ -243,6 +244,15 @@ def _training_script():
     return train_agent
 
 
+def test_training_env_takes_the_coupling_and_keeps_the_defaults_otherwise():
+    script = _training_script()
+    default = script.make_env(0.0).unwrapped.config
+    assert (default.delay, default.lam) == (ToyConfig().delay, ToyConfig().lam)
+    changed = script.make_env(0.2, (3, 1), delay=4, lam=0.5).unwrapped.config
+    assert (changed.delay, changed.lam, changed.resistance_noise) == (4, 0.5, 0.2)
+    assert changed.cross_resistance == ((1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (0.0, 1.0))
+
+
 def test_training_env_observes_the_pending_occupancy():
     env = _training_script().make_env(0.0)
     toy = env.unwrapped
@@ -255,6 +265,56 @@ def test_training_env_observes_the_pending_occupancy():
         obs, *_ = env.step(0)
     # the quarter just closed is not yet in the occupancy the kernel sees, so it must be in the observation
     np.testing.assert_allclose(obs[-n_mech:], toy.coupling.matrix[0])
+
+
+def test_committed_per_quarter_gives_one_drug_per_quarter_and_is_the_oracles_choice():
+    from ocmdp.baselines.oracle import FullInformationOracle
+    from ocmdp.eval.rollout import rollout
+
+    script = _training_script()
+    env = script.make_env(0.0)
+    base = FullInformationOracle(env, steps=20, refine_steps=5, n_random=0)
+    committed = script.committed_per_quarter(FullInformationOracle(env, steps=20, refine_steps=5, n_random=0))
+    assert committed.name == "oracle[one drug per quarter]"
+    log = rollout(env, committed, seed=10_000)
+    given = []
+    for q in np.unique(log.decision_quarter):
+        drugs = np.unique(log.actions[log.decision_quarter == q])
+        assert len(drugs) == 1
+        given.append(int(drugs[0]))
+
+    class Recording(FullInformationOracle):
+        def probs(self, obs, info):
+            p = super().probs(obs, info)
+            self.choices.append(int(np.argmax(p)))
+            return p
+
+    recording = Recording(env, steps=20, refine_steps=5, n_random=0)
+    recording.choices = []
+    replay = script.committed_per_quarter(recording)
+    rollout(env, replay, seed=10_000)
+    assert given == recording.choices and len(set(given)) > 1  # the oracle's own choice each quarter, and it rotates
+
+
+def test_robust_summaries_match_their_definitions():
+    script = _training_script()
+    assert script.iqm([5.0, 1.0, 2.0, 3.0, 100.0]) == pytest.approx(10 / 3)  # sorted 1 2 3 5 100, drops one from each end
+    assert script.iqm([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) == pytest.approx(4.5)  # drops two of eight from each end
+    assert script.probability_of_improvement([0.1, 0.2], [0.2, 0.3]) == pytest.approx((1 + 1 + 0.5 + 1) / 4)
+    lo, hi = script.bootstrap_ci95([0.01, 0.02, 0.03, 0.04])
+    assert 0.01 <= lo < 0.025 < hi <= 0.04
+    assert script.bootstrap_ci95([0.5, 0.5, 0.5]) == [0.5, 0.5]
+    seed_only = script.bootstrap_ci95([0.01, 0.03])
+    both = script.two_level_bootstrap_ci95([[0.0, 0.02], [0.02, 0.04]])  # seed means 0.01 and 0.03, with spread inside each seed
+    assert both[0] <= seed_only[0] and both[1] >= seed_only[1]
+    assert script.two_level_bootstrap_ci95([[0.2, 0.2], [0.2, 0.2]]) == [0.2, 0.2]
+    # seeds agree and only a shared episode effect varies: the interval must carry that effect at full width,
+    # as an episode bootstrap of it does, not shrunk by averaging independent episode draws over seeds
+    effect = np.random.default_rng(1).normal(0.0, 0.01, size=20)
+    crossed = script.two_level_bootstrap_ci95(np.tile(effect, (10, 1)))
+    episodes_only = script.bootstrap_ci95(effect)
+    assert 0.8 < (crossed[1] - crossed[0]) / (episodes_only[1] - episodes_only[0]) < 1.25
+    assert script.bootstrap_ci95(np.tile(effect, (10, 1)).mean(axis=1)) == [pytest.approx(effect.mean())] * 2
 
 
 def test_soft_returns_discount_later_rewards_and_entropy_bonuses_and_stop_at_the_horizon():
@@ -287,6 +347,8 @@ def test_quarterly_and_discounted_failure_follow_the_drugs_given():
         (["--tier", "test", "--seeds", "1000", "--prereg", "preregistrations/missing.yaml"], "--prereg"),
         (["--tier", "dev", "--class-sizes", "4"], "--class-sizes"),
         (["--tier", "dev", "--class-sizes", "3", "0"], "--class-sizes"),
+        (["--tier", "dev", "--lam", "1.0"], "--lam"),
+        (["--tier", "dev", "--delay", "-1"], "--delay"),
     ],
 )
 def test_train_cli_rejects_runs_outside_the_seed_protocol(args, message, tmp_path):
@@ -311,13 +373,32 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     report = json.loads(path.read_text())
     assert report["args"]["tier"] == "val" and report["args"]["seeds"] == [100]
     assert report["evaluation_episode_seeds"] == [10_100, 10_101]
-    assert set(report["git"]) == {"commit", "dirty"}
+    assert set(report["git"]) == {"commit", "dirty", "code_diff_sha256", "untracked_code"}
+    assert report["sac_config"]["oc-sac"]["entropy"] == "pushforward" and report["sac_config"]["sac"]["entropy"] == "action"
+    assert set(report["baselines"]["0.0"]) >= {"uniform", "oracle", "oracle[replans every quarter]", "oracle[one drug per quarter]"}
+    assert report["backend"]["name"] == "local" and report["backend"]["workers"] == 2
     assert report["instance"]["markov_observation"] is True and "resistance_noise" not in report["instance"]
     targets = report["entropy_target_nats"]
     assert targets["oc-sac"] == pytest.approx([0.05 * math.log(2)] * 2) and targets["sac"] == pytest.approx([0.05 * math.log(4)] * 2)
     assert {r["variant"] for r in report["runs"]} == {"oc-sac", "sac"}
     assert report["class_structure"] == {"class_sizes": [2, 2], "imbalance_kl_nats": pytest.approx(0.0, abs=1e-12)}
     assert report["instance"]["cross_resistance"] == [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+
+def test_modal_backend_pins_the_local_package_versions_and_ships_the_code_it_runs():
+    pytest.importorskip("modal")
+    from importlib.metadata import version
+
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import modal_backend
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    assert modal_backend.PINNED == {name: version(name) for name in ("numpy", "torch", "gymnasium")}
+    assert modal_backend.description()["name"] == "modal" and "train_agent" in modal_backend.SCRIPTS
+    with pytest.raises(ValueError, match="must call into"):
+        modal_backend.run_jobs([("os", "system", ("true",))])
+    assert modal_backend.PYTHON == ".".join(map(str, sys.version_info[:2]))
 
 
 def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them(tmp_path):
@@ -336,10 +417,320 @@ def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them
         spent = run["policy_entropy"]
         assert 0.0 <= spent["within_class"] <= min(spent["action"], 0.75 * math.log(3)) + 1e-6
     summary = report["summary"]["0.0"]
+    paired = summary["paired comparison"]
+    assert paired["seeds"] == [0] and paired["seeds_where_oc_sac_fails_less"] in (0, 1)
+    assert 0.0 <= paired["probability_oc_sac_fails_less"] <= 1.0
+    lo, hi = paired["two_level_bootstrap_ci95_of_mean_difference"]
+    assert lo <= summary["oc-sac minus sac (paired by seed)"]["mean"] <= hi
     for variant in ("oc-sac", "sac"):
         assert set(summary[variant]["policy_entropy"]) == {"action", "within_class"}
-        assert all(math.isfinite(summary[variant]["critic"][k]) for k in ("bias", "rmse", "return_sd", "correlation"))
+        critic = summary[variant]["critic"]
+        assert 0.0 <= critic["critic_ranks_best_class_first"] <= 1.0 and critic["critic_choice_regret"] >= -1e-9
+        assert critic["mean_gap_best_to_second"] >= 0.0
+        versus = summary[variant]["minus_baseline_paired_by_episode"]
+        assert set(versus) == set(summary["baselines"])
+        agent = [r for r in report["runs"] if r["variant"] == variant]
+        for name, baseline in report["baselines"]["0.0"].items():
+            expected = np.mean([np.mean(np.asarray(r["expected_failure_rate"]) - baseline["expected_failure_rate"]) for r in agent])
+            assert versus[name]["mean"] == pytest.approx(expected, abs=1e-12)
     assert set(summary["discounted_failure_rate"]) == set(summary["baselines"]) | {"oc-sac", "sac"}
     for run in report["runs"]:
-        assert len(run["discounted_failure_rate"]) == len(run["expected_failure_rate"]) == 2
-        assert run["critic"]["rmse"] >= abs(run["critic"]["bias"])
+        assert len(run["discounted_failure_rate"]) == len(run["expected_failure_rate"]) == 2 == len(run["final_fail_prob"])
+        assert run["critic"]["states"] == 2 * 40 and run["critic"]["actor_choice_regret"] >= -1e-9
+        assert len(run["alpha_path"]) == len(run["xi_path"]) == (200 - 64 + 1) // 40  # one per window of dual_update_every updates
+        assert set(run["alpha_at_evaluation"]) == {"q10", "q50", "q90"}
+        assert set(run["host"]) == {"machine", "cpu", "simd"}
+
+
+def _phase_cli(*args, timeout=300):
+    return subprocess.run([sys.executable, "experiments/sweep_phase_diagram.py", *args], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        ([], "--tier"),
+        (["--tier", "dev", "--lams", "1.0"], "--lams"),
+        (["--tier", "dev", "--delays", "-1"], "--delays"),
+        (["--tier", "dev", "--episodes", "1"], "--episodes"),
+        (["--tier", "test"], "--prereg"),
+        (["--tier", "dev", "--kappa", "0.6", "--delta", "0.5"], "--kappa/--delta"),
+    ],
+)
+def test_phase_cli_rejects_invalid_grids(args, message, tmp_path):
+    result = _phase_cli(*args, "--out", str(tmp_path))
+    assert result.returncode == 2 and message in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
+def test_phase_cli_pairs_every_policy_on_the_tiers_episodes_and_its_contrasts_recompute(tmp_path):
+    grid = ["--delays", "0", "2", "--lams", "0.5", "--sigmas", "0.0", "0.3", "--horizon", "6", "--episodes", "2", "--workers", "4",
+            "--kappa", "0.2", "--delta", "0.1"]  # fmt: skip
+    result = _phase_cli("--tier", "val", *grid, "--out", str(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    (path,) = tmp_path.glob("phase_*.json")
+    report = json.loads(path.read_text())
+    assert report["evaluation_episode_seeds"] == [10_100, 10_101] and report["backend"]["name"] == "local"
+    assert report["instance"]["horizon_quarters"] == 6 and report["instance"]["cross_resistance"] == [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+    assert (report["instance"]["kappa"], report["instance"]["delta"]) == (0.2, 0.1)
+    assert len(report["cells"]) == 4 and len(report["results"]) == 4 * len(report["policies"])
+    assert all(len(r["final_fail_prob"]) == 2 and len(r["final_fail_prob"][0]) == 4 for r in report["results"])
+    rates = {(r["delay"], r["lam"], r["sigma"], r["policy"]): r["expected_failure_rate"] for r in report["results"]}
+    for cell in report["cells"]:
+        key = (cell["delay"], cell["lam"], cell["sigma"])
+        for name, (a, b) in report["contrasts"].items():
+            diff = np.array(rates[(*key, a)]) - np.array(rates[(*key, b)])
+            assert cell[name]["mean"] == pytest.approx(diff.mean(), abs=1e-12)
+        if cell["sigma"] == 0.0:
+            # no noise: the model is exact, so replanning every quarter cannot lose to committing at the start
+            assert cell["value_of_feedback"]["mean"] >= -1e-9
+
+
+def test_phase_plot_draws_every_cell_with_its_interval_and_tabulates_it(tmp_path):
+    cells = [
+        {"delay": d, "lam": lam, "sigma": s, "value_of_feedback": {"mean": 0.01 * s + 0.001 * d, "ci95": 0.002}}
+        for d in (0, 2) for lam in (0.5, 0.9) for s in (0.0, 0.2)
+    ]  # fmt: skip
+    results = [
+        {"delay": c["delay"], "lam": c["lam"], "sigma": c["sigma"], "policy": policy, "expected_failure_rate": rates}
+        for c in cells
+        for policy, rates in (("planned-once", [0.40, 0.42, 0.41]), ("replanned-every-1", [0.39, 0.40, 0.40]))
+    ]  # fmt: skip
+    report = {"cells": cells, "results": results, "contrasts": {"value_of_feedback": ["planned-once", "replanned-every-1"]},
+              "evaluation_episode_seeds": [10_000, 10_001, 10_002], "args": {"tier": "dev"}}  # fmt: skip
+    (tmp_path / "phase_x.json").write_text(json.dumps(report))
+    predictions = [{"delay": c["delay"], "lam": c["lam"], "sigma": c["sigma"], "value_of_feedback": 0.0} for c in cells]
+    (tmp_path / "pred.json").write_text(json.dumps(predictions))
+    result = subprocess.run(
+        [sys.executable, "experiments/plot_phase_diagram.py", str(tmp_path / "phase_x.json"), "--predictions", str(tmp_path / "pred.json"), "--out", str(tmp_path / "fig")],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    svg = (tmp_path / "fig" / "phase_x_value_of_feedback.svg").read_text()
+    assert svg.count("<circle") == 2 + 2 * len(cells)  # legend, then a filled marker and a hollow prediction per cell
+    assert svg.count('stroke-width="1.5"') == len(cells)  # one interval whisker per measured cell
+    with open(tmp_path / "fig" / "phase_x_value_of_feedback.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == len(cells) and {float(r["predicted"]) for r in rows} == {0.0}
+    # recomputed from the raw episodes, not copied from the summaries: differences 0.01, 0.02, 0.01
+    assert float(rows[0]["mean"]) == pytest.approx(0.04 / 3) and float(rows[0]["ci95"]) == pytest.approx(4.302653 * (0.01 / 3**0.5) / 3**0.5, rel=1e-6)
+
+
+def _stats():
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import stats
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    return stats
+
+
+@pytest.mark.parametrize(
+    "probability, df, quantile",
+    [(0.975, 1, 12.706205), (0.975, 4, 2.776445), (0.975, 9, 2.262157), (0.975, 39, 2.022691), (0.975, 200, 1.971896), (0.95, 4, 2.131847)],
+)
+def test_t_quantile_matches_tables(probability, df, quantile):
+    assert _stats().t_quantile(probability, df) == pytest.approx(quantile, abs=2e-6)
+
+
+def test_equivalence_needs_the_whole_90_percent_interval_inside_the_margin():
+    stats = _stats()
+    close = stats.equivalent([0.001, -0.001, 0.0005, -0.0005, 0.0], margin=0.005)
+    assert close["equivalent"] and -0.005 < close["ci90"][0] < close["ci90"][1] < 0.005
+    assert not stats.equivalent([0.02, 0.021, 0.019, 0.02], margin=0.005)["equivalent"]
+    assert not stats.equivalent([0.004, -0.004, 0.004, -0.004], margin=0.005)["equivalent"]  # centred on zero, too wide
+
+
+def test_counterfactual_values_tie_inside_a_class_and_stop_at_the_horizon():
+    import copy as copy_module
+
+    from ocmdp.agents.oc_sac import Agent, SACConfig
+
+    script = _training_script()
+    env = script.make_env(0.0, (3, 1))
+    toy = env.unwrapped
+    cfg = SACConfig(total_quarters=240, learning_starts=48, batch_size=32, hidden_dim=16)
+    obs, _ = env.reset(seed=10_000)
+    torch.manual_seed(0)
+    agent = Agent(obs.shape[0], torch.tensor(toy.coupling.matrix, dtype=torch.float32),
+                  torch.tensor(toy.coupling.mechanism_assignment(), dtype=torch.float32), toy.coupling.n_mechanisms, cfg)  # fmt: skip
+    rng = np.random.default_rng(0)
+    start = [script._continuation_return(env, d, agent, rng) for d in range(4)]
+    assert start[0] == start[1] == start[2] != start[3]  # drugs 0-2 share a mechanism
+    last = copy_module.deepcopy(env)
+    while last.unwrapped.state()["quarter"] < toy.config.horizon_quarters - 1:
+        last.step(0)
+    assert last.unwrapped.state()["quarter"] == toy.config.horizon_quarters - 1
+    fail_prob = failure_probability(last.unwrapped.state()["resistance"], toy.coupling.matrix)[3]
+    # one quarter left: its reward and nothing after it, no continuation and no entropy bonus
+    assert script._continuation_return(last, 3, agent, rng) == pytest.approx(-cfg.reward_scale * fail_prob)
+
+
+def _predictor():
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import predict_entropy_gap
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    return predict_entropy_gap
+
+
+def test_predicted_entropy_gap_vanishes_where_the_two_objectives_coincide_and_favours_large_classes_otherwise():
+    predictor = _predictor()
+    fast = dict(gamma=0.97, reward_scale=10.0, steps=40, n_random=1, seed=0)
+    both = lambda a: {"class entropy": a, "drug entropy": a}  # noqa: E731
+    equal = predictor.predict((2, 2), both(0.5), **fast)
+    assert equal["class entropy minus drug entropy"] == 0.0  # the objectives differ by the constant alpha log 2
+    cold = predictor.predict((3, 1), both(0.0), **fast)
+    assert cold["class entropy minus drug entropy"] == 0.0
+    warm = predictor.predict((3, 1), both(2.0), **fast)
+    assert warm["drug entropy"]["mean_mass_by_class"][0] > warm["class entropy"]["mean_mass_by_class"][0]
+
+
+def _synthetic_phase_report(kappa, crossing_at, constant_sign=None, sigmas=(0.0, 0.1, 0.2, 0.3, 0.4), episodes=6):
+    """planned-once minus greedy equals sigma - crossing_at (or a constant of the given sign), plus small episode noise."""
+    results = []
+    for s in sigmas:
+        offset = (s - crossing_at) if constant_sign is None else constant_sign * (0.05 + s)
+        noise = [0.001 * ((e % 3) - 1) for e in range(episodes)]
+        results.append({"delay": 1, "lam": 0.8, "sigma": s, "policy": "greedy", "expected_failure_rate": [0.4] * episodes})
+        results.append({"delay": 1, "lam": 0.8, "sigma": s, "policy": "planned-once", "expected_failure_rate": [0.4 + offset + n for n in noise]})
+    return {"instance": {"kappa": kappa, "delta": 0.05, "horizon_quarters": 40}, "results": results}
+
+
+def _scorer():
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import score_phase_predictions
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    return score_phase_predictions
+
+
+@pytest.mark.parametrize("predicted, expected_error, verdict", [(0.2, 0.0, "pass"), (0.05, math.log(4), "fail")])
+def test_scorer_measures_the_crossing_and_rules_against_the_margin(predicted, expected_error, verdict):
+    scorer = _scorer()
+    lines, episodes = scorer.measured_lines([_synthetic_phase_report(0.1, 0.2)], "planned_once_minus_greedy")
+    out = scorer.score(lines, episodes, {(0.1, 0.05, 40, 1, 0.8): (predicted, 1)}, None, [], 1, math.log(math.sqrt(2)), 200, 0)
+    assert out["lines"][0]["measured_crossing"] == pytest.approx(0.2, abs=2e-3)
+    assert out["E"] == pytest.approx(expected_error, abs=0.02) and out["verdict"] == verdict
+
+
+def test_scorer_censors_crossings_outside_the_grid_by_the_contrasts_orientation():
+    scorer = _scorer()
+    sigmas = np.array([0.0, 0.1, 0.2, 0.4])
+    # beyond the crossing the contrast is positive: a line positive everywhere crossed below the grid, negative everywhere above it
+    assert scorer.line_error(sigmas, (None, 1), (None, 1), beyond=1) == 0.0
+    assert scorer.line_error(sigmas, (None, -1), (None, -1), beyond=1) == 0.0
+    assert scorer.line_error(sigmas, (None, 1), (None, -1), beyond=1) == pytest.approx(math.log(0.4 / 0.1))
+    assert scorer.line_error(sigmas, (0.2, 1), (None, -1), beyond=1) == pytest.approx(math.log(0.4 / 0.2))
+    assert scorer.line_error(sigmas, (None, 1), (0.2, 1), beyond=1) == pytest.approx(math.log(0.2 / 0.1))
+
+
+def test_scorer_flags_a_shift_in_the_wrong_direction_and_compares_with_a_null():
+    scorer = _scorer()
+    reports = [_synthetic_phase_report(0.1, 0.2), _synthetic_phase_report(0.2, 0.3)]
+    lines, episodes = scorer.measured_lines(reports, "planned_once_minus_greedy")
+    theory = {(0.1, 0.05, 40, 1, 0.8): (0.2, 1), (0.2, 0.05, 40, 1, 0.8): (0.3, 1)}
+    null = {(0.1, 0.05, 40, 1, 0.8): (0.25, 1), (0.2, 0.05, 40, 1, 0.8): (0.25, 1)}
+    direction = {"from": {"kappa": 0.1, "delta": 0.05, "horizon": 40}, "to": {"kappa": 0.2, "delta": 0.05, "horizon": 40}, "sign": -1}
+    out = scorer.score(lines, episodes, theory, null, [direction], 1, math.log(math.sqrt(2)), 200, 0)
+    (shift,) = out["directions"]
+    assert shift["log_shift"] == pytest.approx(math.log(1.5), abs=0.02) and shift["wrong_sign"]
+    assert out["E_minus_E_null_ci95"][1] < 0  # the theory places both crossings better than the shared null
+
+
+def test_null_predictions_carry_each_dev_crossing_to_every_held_out_setting():
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import null_phase_predictions
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    dev = _synthetic_phase_report(0.1, 0.2)
+    settings = [{"kappa": 0.05, "delta": 0.025, "horizon": 40}, {"kappa": 0.1, "delta": 0.05, "horizon": 80}]
+    null = null_phase_predictions.null_predictions(dev, "planned_once_minus_greedy", 1, settings)
+    assert len(null["lines"]) == 2 and {row["horizon"] for row in null["lines"]} == {40, 80}
+    assert all(row["sigma_star"] == pytest.approx(0.2, abs=2e-3) and row["sign_at_max_sigma"] == 1 for row in null["lines"])
+
+
+def test_gap_attribution_closes_on_the_measured_gap_and_its_parts_are_consistent():
+    from ocmdp.agents.oc_sac import QuarterlyChoicePolicy, SACConfig, train
+    from ocmdp.envs.toy import ToyOCMDPEnv as Env
+    from ocmdp.envs.wrappers import MechanismObservation
+
+    script = _training_script()
+    config = ToyConfig(cross_resistance=script.cross_resistance((2, 1)), horizon_quarters=5, decisions_per_quarter=3, **script.ENV_KWARGS)
+    env = MechanismObservation(Env(config))
+    agent = train(env, SACConfig(total_quarters=120, learning_starts=40, batch_size=32, hidden_dim=16, dual_update_every=40), seed=0).agent
+    observations, snapshots, chosen = [], [], []
+
+    def choose(obs, rng):
+        observations.append(np.array(obs, dtype=np.float32))
+        snapshots.append(copy.deepcopy(env))
+        chosen.append(agent.choose(obs, rng))
+        return chosen[-1]
+
+    logs = script._rollouts(env, QuarterlyChoicePolicy(choose, 3, "oc-sac"), 2, 10_000)
+    out = script._gap_attribution(agent, snapshots, np.stack(observations), np.array(chosen), logs, env.unwrapped.coupling.identical_row_classes(), planner_steps=20)
+    assert out["closure_error"] < 1e-9  # the per-decision losses telescope to the gap
+    parts = sum(out[k] for k in ("lost_to_policy_class", "lost_to_continuation_ranks_differently", "lost_to_critic_misranks", "lost_to_actor_departs_from_critic"))
+    assert parts == pytest.approx(out["gap_to_planner"], abs=1e-9)
+    assert min(out[k] for k in ("lost_to_continuation_ranks_differently", "lost_to_critic_misranks", "lost_to_actor_departs_from_critic")) >= 0.0
+
+
+
+def test_continuation_value_matches_a_step_by_step_recomputation():
+    from ocmdp.agents.oc_sac import SACConfig, train
+
+    script = _training_script()
+    env = script.make_env(0.0)
+    cfg = SACConfig(total_quarters=240, learning_starts=48, batch_size=32, hidden_dim=16, dual_update_every=40)
+    agent = train(env, cfg, seed=0).agent
+    obs, _ = env.reset(seed=10_000)
+    first = int(np.argmin(agent.probs(obs)))  # a drug the agent would not choose, so the continuation has to switch
+    copied = copy.deepcopy(env)
+    rewards, bonuses, drug, done = [], [], first, False
+    while not done:
+        quarter_rewards = []
+        quarter = copied.unwrapped.state()["quarter"]
+        while not done and copied.unwrapped.state()["quarter"] == quarter:
+            obs, reward, terminated, truncated, _ = copied.step(drug)
+            quarter_rewards.append(reward)
+            done = terminated or truncated
+        rewards.append(cfg.reward_scale * np.mean(quarter_rewards))
+        if not done:
+            with torch.no_grad():
+                probs, log_alpha = agent.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
+                bonuses.append(float(log_alpha.clamp(*cfg.log_alpha_range).exp()[0] * agent.entropy(probs)[0]))
+            drug = int(probs[0].argmax())
+    assert any(b > 0 for b in bonuses) and drug != first
+    expected = rewards[0] + sum(cfg.gamma**k * (bonuses[k - 1] + rewards[k]) for k in range(1, len(rewards)))
+    assert script._continuation_return(env, first, agent, np.random.default_rng(0)) == pytest.approx(expected, rel=1e-9)
+
+
+def test_git_state_hashes_code_changes_only_including_names_with_spaces(tmp_path, monkeypatch):
+    def git(*args):
+        subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    (tmp_path / "ocmdp").mkdir()
+    (tmp_path / "ocmdp" / "x.py").write_text("a = 1\n")
+    git("init", "-q")
+    git("add", "ocmdp/x.py")
+    git("commit", "-q", "-m", "fixture")
+    script = _training_script()
+    monkeypatch.setattr(script, "ROOT", tmp_path)
+    clean = script.git_state()
+    assert clean["dirty"] is False and clean["code_diff_sha256"] is None
+    (tmp_path / "decisions").mkdir()
+    (tmp_path / "decisions" / "note.md").write_text("not code\n")
+    assert script.git_state()["dirty"] is False
+    (tmp_path / "experiments").mkdir()
+    spaced = tmp_path / "experiments" / "a b.py"
+    spaced.write_text("b = 1\n")
+    first = script.git_state()
+    assert first["dirty"] and first["untracked_code"] == ["experiments/a b.py"]
+    spaced.write_text("b = 2\n")
+    second = script.git_state()
+    assert second["code_diff_sha256"] != first["code_diff_sha256"]
+    (tmp_path / "ocmdp" / "x.py").write_text("a = 2\n")
+    assert script.git_state()["code_diff_sha256"] not in (first["code_diff_sha256"], second["code_diff_sha256"])

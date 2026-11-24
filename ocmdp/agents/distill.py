@@ -70,7 +70,7 @@ def distill(
     losses = []
     for _ in range(steps):
         idx = torch.randint(len(demos.obs), (min(batch_size, len(demos.obs)),), generator=generator)
-        probs, _ = head(demos.obs[idx], embeddings, demos.masks[idx])
+        probs = head(demos.obs[idx], embeddings, demos.masks[idx])
         loss = -(demos.probs[idx] * probs.clamp_min(1e-8).log()).sum(-1).mean()
         opt.zero_grad()
         loss.backward()
@@ -114,5 +114,5 @@ class HeadPolicy(HeuristicPolicy):
 
     def probs(self, obs: np.ndarray, info: dict) -> np.ndarray:
         with torch.no_grad():
-            p, _ = self.head(torch.as_tensor(obs, dtype=torch.float32)[None], self.embeddings)
+            p = self.head(torch.as_tensor(obs, dtype=torch.float32)[None], self.embeddings)
         return p[0].double().numpy()

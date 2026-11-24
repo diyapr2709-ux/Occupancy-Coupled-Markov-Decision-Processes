@@ -17,6 +17,14 @@ python3 -m venv .venv
 .venv/bin/python experiments/validate.py           # full seed protocol (about 10 minutes)
 .venv/bin/python experiments/train_agent.py --tier dev   # train and compare agents (about 15 minutes on 10 cores)
 .venv/bin/python experiments/planner_restarts.py   # how far the oracle's plan moves with its random starts
+.venv/bin/python experiments/sweep_phase_diagram.py --tier dev   # value of feedback over delay, memory and noise (planning only)
+.venv/bin/python experiments/plot_phase_diagram.py runs/phase/<report>.json   # small-multiples SVG and CSV in figures/
+```
+
+Training and the phase diagram can run on Modal, one container per job, with `--backend modal` (needs `pip install -e ".[modal]"` and a Modal profile):
+
+```bash
+.venv/bin/python experiments/train_agent.py --tier dev --backend modal
 ```
 
 ## Layout
@@ -45,6 +53,12 @@ python3 -m venv .venv
 | `experiments/validate.py` | Runs the harness and writes a JSON report to `runs/vv/` |
 | `experiments/train_agent.py` | Trains OC-SAC and standard SAC across seeds and compares them with the baselines; writes `runs/train/` |
 | `experiments/planner_restarts.py` | Spread of the oracle's planned failure rate over planner seeds; writes `runs/planner/` |
+| `experiments/sweep_phase_diagram.py` | Heuristics and planners over a (delay, memory, noise) grid, paired per cell; writes `runs/phase/` |
+| `experiments/plot_phase_diagram.py` | Small-multiples figure of one phase-diagram contrast, with an optional prediction overlay; writes `figures/` |
+| `experiments/modal_backend.py` | Runs the jobs of the experiment scripts on Modal, with package versions and SIMD kernels pinned |
+| `experiments/predict_entropy_gap.py` | Failure-rate gap between class-entropy and drug-entropy soft-optimal schedules on the mean-field model; writes `runs/predict/` |
+| `experiments/score_phase_predictions.py` | Scores predicted sign changes of a phase-diagram contrast against measured ones, with a joint episode bootstrap |
+| `experiments/null_phase_predictions.py` | Theory-free predictions for held-out settings, carried over from the dev map |
 | `seeds.yaml` | The dev, val and test seed tiers |
 | `budget.yaml` | Daily limit on launched experiment commands |
 
