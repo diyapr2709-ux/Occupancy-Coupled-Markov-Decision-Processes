@@ -506,11 +506,17 @@ def test_test_tier_checks_refuse_in_order_and_cannot_borrow_an_approval(tmp_path
     (out / "launches" / "train_earlier.json").write_text(json.dumps({"launch_id": "train_earlier", "tier": "test", "prereg_slug": "planned"}), encoding="utf-8")
     assert script.earlier_test_launches("planned", out) == ["train_earlier"]
     assert "already used by launch train_earlier" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
-    link = repo / "preregistrations" / "approved.yaml"
-    link.symlink_to(planned)
-    assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
     planned.write_text("slug: planned, edited after the commit\n", encoding="utf-8")
     assert "committed, unmodified" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
+    # last, so a skip below drops no other check: a link is refused before the commit state is read
+    link = repo / "preregistrations" / "approved.yaml"
+    try:
+        link.symlink_to(planned)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:  # creating symlinks needs a privilege or Developer Mode on Windows
+            pytest.skip("this Windows account may not create symbolic links (WinError 1314)")
+        raise
+    assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
 
 
 def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
