@@ -144,17 +144,17 @@ def main() -> int:
     parser.add_argument("--predictions", type=Path, help="JSON list of predicted cell values to overlay")
     parser.add_argument("--out", type=Path, default=Path("figures"))
     args = parser.parse_args()
-    report = json.loads(args.report.read_text())
+    report = json.loads(args.report.read_text(encoding="utf-8"))
     if args.contrast not in report["contrasts"]:
         parser.error(f"--contrast must be one of {sorted(report['contrasts'])}")
-    predictions = json.loads(args.predictions.read_text()) if args.predictions else None
+    predictions = json.loads(args.predictions.read_text(encoding="utf-8")) if args.predictions else None
     if isinstance(predictions, dict):  # also accept {"cells": [...]}
         predictions = predictions.get("cells", [])
     svg, rows = draw(report, args.contrast, predictions)
     args.out.mkdir(parents=True, exist_ok=True)
     stem = f"{args.report.stem}_{args.contrast}"
-    (args.out / f"{stem}.svg").write_text(svg)
-    with open(args.out / f"{stem}.csv", "w", newline="") as f:
+    (args.out / f"{stem}.svg").write_text(svg, encoding="utf-8")
+    with open(args.out / f"{stem}.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["delay", "lam", "sigma", "mean", "ci95", "predicted"])
         writer.writeheader()
         writer.writerows(rows)

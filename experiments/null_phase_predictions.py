@@ -36,10 +36,10 @@ def main() -> int:
     parser.add_argument("--contrast", required=True, choices=sorted(CONTRASTS))
     parser.add_argument("--sign-beyond-crossing", type=int, required=True, choices=(1, -1))
     args = parser.parse_args()
-    report = json.loads(args.dev_report.read_text())
+    report = json.loads(args.dev_report.read_text(encoding="utf-8"))
     if report["args"]["tier"] != "dev":
         parser.error("the null is fitted on the dev map only")
-    print(json.dumps(null_predictions(report, args.contrast, args.sign_beyond_crossing, json.loads(args.settings.read_text())), indent=2))
+    print(json.dumps(null_predictions(report, args.contrast, args.sign_beyond_crossing, json.loads(args.settings.read_text(encoding="utf-8"))), indent=2))
     return 0
 
 

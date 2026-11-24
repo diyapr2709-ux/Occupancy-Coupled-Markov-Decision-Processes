@@ -105,7 +105,7 @@ def imbalance_kl(class_sizes: tuple[int, ...]) -> float:
 
 def load_tiers(path: Path) -> dict[str, range]:
     """Read `tier: [first, last]` lines (inclusive) into seed ranges; the three tiers must be present and disjoint."""
-    found = re.findall(r"^(\w+):\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", path.read_text(), re.M)
+    found = re.findall(r"^(\w+):\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", path.read_text(encoding="utf-8"), re.M)
     tiers = {name: range(int(first), int(last) + 1) for name, first, last in found}
     if set(tiers) != set(TIERS) or len(found) != len(TIERS) or any(len(r) == 0 for r in tiers.values()):
         raise ValueError(f"{path} must define a non-empty [first, last] range for each of {', '.join(TIERS)}, once")
@@ -201,7 +201,7 @@ def earlier_test_launches(slug: str, out: Path) -> list[str]:
     """Ids of earlier test-tier launches of preregistration `slug`, from the launch records under runs/ and `out`."""
     found = []
     for record in sorted({*ROOT.glob("runs/*/launches/*.json"), *out.glob("launches/*.json")}):
-        earlier = json.loads(record.read_text())
+        earlier = json.loads(record.read_text(encoding="utf-8"))
         if earlier.get("tier") == "test" and earlier.get("prereg_slug") == slug:
             found.append(earlier.get("launch_id"))
     return found
@@ -229,7 +229,7 @@ def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git:
     if not (tracked and unmodified):
         parser.error(f"the test tier needs a committed, unmodified preregistration; {relative} is not")
     slug = resolved.stem
-    named = re.search(r"^platform:\s*(\S+)\s*$", resolved.read_text(), re.M)
+    named = re.search(r"^platform:\s*(\S+)\s*$", resolved.read_text(encoding="utf-8"), re.M)
     if named is None:
         parser.error(f"{relative} must name the platform its val selection ran on, in a `platform:` line")
     if named.group(1) != platform_label:
@@ -282,7 +282,7 @@ def record_launch(out: Path, launch_id: str, args: dict, git: dict, backend: str
     folder.mkdir(parents=True, exist_ok=True)
     record = {"launch_id": launch_id, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tier": args["tier"], "platform": args["platform"],
               "backend": backend, "prereg_slug": prereg_slug, "prereg_sha256": prereg_sha256, "git": git, "args": args}  # fmt: skip
-    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2))
+    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
 def _rollouts(env, policy, episodes: int, first_episode: int) -> list:
@@ -835,7 +835,7 @@ def main() -> int:
         "baselines": {str(s): baselines[s] for s in args.sigmas},  # per-episode values, so every contrast can be recomputed
     }
     report["summary"] = {str(s): summarise(runs, baselines[s], s, args.equivalence_margin) for s in args.sigmas}
-    path.write_text(json.dumps(report, indent=2))
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     for sigma in args.sigmas:
         summary = report["summary"][str(sigma)]

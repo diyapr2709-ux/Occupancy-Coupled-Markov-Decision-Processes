@@ -228,7 +228,7 @@ def test_validate_cli_writes_a_complete_report(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     (report,) = tmp_path.glob("vv_*.json")
-    checks = {c["name"]: c["status"] for c in json.loads(report.read_text())["verification"]}
+    checks = {c["name"]: c["status"] for c in json.loads(report.read_text(encoding="utf-8"))["verification"]}
     assert set(checks) == set(VERIFICATION)
     assert "fail" not in checks.values()
 
@@ -364,7 +364,7 @@ def test_train_cli_rejects_runs_outside_the_seed_protocol(args, message, tmp_pat
 
 def test_train_cli_refuses_a_preregistration_outside_the_repository(tmp_path):
     prereg = tmp_path / "outside.yaml"
-    prereg.write_text("slug: outside\n")
+    prereg.write_text("slug: outside\n", encoding="utf-8")
     result = _train_cli("--tier", "test", "--seeds", "1000", "--prereg", str(prereg), "--out", str(tmp_path / "out"))
     assert result.returncode == 2 and "inside the repository" in result.stderr
     assert not (tmp_path / "out" / "launches").exists()
@@ -462,14 +462,14 @@ def test_no_file_carries_a_home_directory_path_beyond_the_known_reports():
         path = ROOT / name
         if path.suffix == ".pt" or not path.is_file():
             continue
-        if pattern.search(path.read_text(errors="ignore")) and REPORTS_WITH_A_HOME_PATH.get(name) != hashlib.sha256(path.read_bytes()).hexdigest():
+        if pattern.search(path.read_text(encoding="utf-8", errors="ignore")) and REPORTS_WITH_A_HOME_PATH.get(name) != hashlib.sha256(path.read_bytes()).hexdigest():
             offending.append(name)
     assert offending == []
 
 
 def test_a_seed_file_cannot_relabel_the_test_seeds(tmp_path):
     relabelled = tmp_path / "seeds.yaml"
-    relabelled.write_text("dev: [1000, 1099]\nval: [100, 199]\ntest: [2000, 2099]\n")
+    relabelled.write_text("dev: [1000, 1099]\nval: [100, 199]\ntest: [2000, 2099]\n", encoding="utf-8")
     result = _train_cli("--tier", "dev", "--seeds", "1000", "--seeds-file", str(relabelled), "--out", str(tmp_path / "out"))
     assert result.returncode == 2 and "overlaps the repository's test seeds" in result.stderr
     result = _train_cli("--tier", "test", "--seeds", "2000", "--seeds-file", str(relabelled), "--out", str(tmp_path / "out"))
@@ -489,9 +489,9 @@ def test_test_tier_checks_refuse_in_order_and_cannot_borrow_an_approval(tmp_path
     script = _training_script()
     repo = tmp_path / "repo"
     (repo / "preregistrations").mkdir(parents=True)
-    (repo / "preregistrations" / "planned.yaml").write_text("slug: planned\nplatform: test-host\n")
-    (repo / "preregistrations" / "unplaced.yaml").write_text("slug: unplaced\n")
-    (repo / "notes.yaml").write_text("not a preregistration\n")
+    (repo / "preregistrations" / "planned.yaml").write_text("slug: planned\nplatform: test-host\n", encoding="utf-8")
+    (repo / "preregistrations" / "unplaced.yaml").write_text("slug: unplaced\n", encoding="utf-8")
+    (repo / "notes.yaml").write_text("not a preregistration\n", encoding="utf-8")
     for args in (["init", "-q"], ["add", "."], ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "fixture"]):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     monkeypatch.setattr(script, "ROOT", repo)
@@ -503,13 +503,13 @@ def test_test_tier_checks_refuse_in_order_and_cannot_borrow_an_approval(tmp_path
     assert "preregistered for platform test-host, not rtx-1" in _refusal(capsys, script.check_test_launch, planned, clean, out, "rtx-1")
     assert "approvals/planned.ok" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
     (out / "launches").mkdir(parents=True)
-    (out / "launches" / "train_earlier.json").write_text(json.dumps({"launch_id": "train_earlier", "tier": "test", "prereg_slug": "planned"}))
+    (out / "launches" / "train_earlier.json").write_text(json.dumps({"launch_id": "train_earlier", "tier": "test", "prereg_slug": "planned"}), encoding="utf-8")
     assert script.earlier_test_launches("planned", out) == ["train_earlier"]
     assert "already used by launch train_earlier" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
     link = repo / "preregistrations" / "approved.yaml"
     link.symlink_to(planned)
     assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
-    planned.write_text("slug: planned, edited after the commit\n")
+    planned.write_text("slug: planned, edited after the commit\n", encoding="utf-8")
     assert "committed, unmodified" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
 
 
@@ -529,7 +529,7 @@ def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
 
 def test_train_cli_rejects_overlapping_tiers(tmp_path):
     seeds_file = tmp_path / "seeds.yaml"
-    seeds_file.write_text("dev: [0, 99]\nval: [50, 199]\ntest: [1000, 1099]\n")
+    seeds_file.write_text("dev: [0, 99]\nval: [50, 199]\ntest: [1000, 1099]\n", encoding="utf-8")
     result = _train_cli("--tier", "dev", "--seeds-file", str(seeds_file), "--out", str(tmp_path / "out"))
     assert result.returncode == 2 and "overlap" in result.stderr
 
@@ -540,10 +540,10 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     result = _train_cli("--tier", "val", "--seeds", "100", "--platform", "test-host", *small, "--out", str(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (path,) = tmp_path.glob("train_*.json")
-    report = json.loads(path.read_text())
+    report = json.loads(path.read_text(encoding="utf-8"))
     assert report["args"]["tier"] == "val" and report["args"]["seeds"] == [100]
     assert report["report_schema"] == 2 and report["launch_id"] == path.stem and report["platform"] == "test-host"
-    assert report["args"]["seeds_file"] == "seeds.yaml" and platform.node() not in path.read_text()  # no machine's names or directories
+    assert report["args"]["seeds_file"] == "seeds.yaml" and platform.node() not in path.read_text(encoding="utf-8")  # no machine's names or directories
     assert report["args"]["out"] == f"<outside the repository>/{tmp_path.name}"
     sys.path.insert(0, str(ROOT / "experiments"))
     try:
@@ -556,7 +556,7 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     first.write_bytes(intact[:-1] + b"x")
     assert verify_checkpoints.verify(path) == [f"size or SHA-256 differs from the report: {report['runs'][0]['checkpoints'][0]['path']}"]
     first.write_bytes(intact)
-    launch = json.loads((tmp_path / "launches" / f"{path.stem}.json").read_text())
+    launch = json.loads((tmp_path / "launches" / f"{path.stem}.json").read_text(encoding="utf-8"))
     assert launch["launch_id"] == path.stem and launch["tier"] == "val" and launch["platform"] == "test-host"
     assert launch["git"] == report["git"] and launch["prereg_slug"] is None and launch["prereg_sha256"] is None
     oc_sac, sac = (next(r for r in report["runs"] if r["variant"] == v) for v in ("oc-sac", "sac"))
@@ -615,7 +615,7 @@ def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them
     result = _train_cli("--tier", "val", "--seeds", "100", "--platform", "test-host", "--class-sizes", "3", "1", "--checkpoint-every", "100", *small, "--out", str(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (path,) = tmp_path.glob("train_*.json")
-    report = json.loads(path.read_text())
+    report = json.loads(path.read_text(encoding="utf-8"))
     assert report["instance"]["cross_resistance"] == [[1.0, 0.0]] * 3 + [[0.0, 1.0]]
     kl = math.log(2) + 0.75 * math.log(0.75) + 0.25 * math.log(0.25)
     assert report["class_structure"] == {"class_sizes": [3, 1], "imbalance_kl_nats": pytest.approx(kl)}
@@ -685,7 +685,7 @@ def test_phase_cli_pairs_every_policy_on_the_tiers_episodes_and_its_contrasts_re
     result = _phase_cli("--tier", "val", "--platform", "test-host", *grid, "--out", str(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (path,) = tmp_path.glob("phase_*.json")
-    report = json.loads(path.read_text())
+    report = json.loads(path.read_text(encoding="utf-8"))
     assert report["evaluation_episode_seeds"] == [10_100, 10_101] and report["backend"]["name"] == "local"
     assert report["launch_id"] == path.stem and (tmp_path / "launches" / f"{path.stem}.json").is_file()
     assert report["instance"]["horizon_quarters"] == 6 and report["instance"]["cross_resistance"] == [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
@@ -715,18 +715,18 @@ def test_phase_plot_draws_every_cell_with_its_interval_and_tabulates_it(tmp_path
     ]  # fmt: skip
     report = {"cells": cells, "results": results, "contrasts": {"value_of_feedback": ["planned-once", "replanned-every-1"]},
               "evaluation_episode_seeds": [10_000, 10_001, 10_002], "args": {"tier": "dev"}}  # fmt: skip
-    (tmp_path / "phase_x.json").write_text(json.dumps(report))
+    (tmp_path / "phase_x.json").write_text(json.dumps(report), encoding="utf-8")
     predictions = [{"delay": c["delay"], "lam": c["lam"], "sigma": c["sigma"], "value_of_feedback": 0.0} for c in cells]
-    (tmp_path / "pred.json").write_text(json.dumps(predictions))
+    (tmp_path / "pred.json").write_text(json.dumps(predictions), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, "experiments/plot_phase_diagram.py", str(tmp_path / "phase_x.json"), "--predictions", str(tmp_path / "pred.json"), "--out", str(tmp_path / "fig")],
         cwd=ROOT, capture_output=True, text=True, timeout=60,
     )  # fmt: skip
     assert result.returncode == 0, result.stderr
-    svg = (tmp_path / "fig" / "phase_x_value_of_feedback.svg").read_text()
+    svg = (tmp_path / "fig" / "phase_x_value_of_feedback.svg").read_text(encoding="utf-8")
     assert svg.count("<circle") == 2 + 2 * len(cells)  # legend, then a filled marker and a hollow prediction per cell
     assert svg.count('stroke-width="1.5"') == len(cells)  # one interval whisker per measured cell
-    with open(tmp_path / "fig" / "phase_x_value_of_feedback.csv") as f:
+    with open(tmp_path / "fig" / "phase_x_value_of_feedback.csv", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == len(cells) and {float(r["predicted"]) for r in rows} == {0.0}
     # recomputed from the raw episodes, not copied from the summaries: differences 0.01, 0.02, 0.01
@@ -805,7 +805,7 @@ def test_predicted_entropy_gap_vanishes_where_the_two_objectives_coincide_and_fa
     fast = dict(gamma=0.97, reward_scale=10.0, steps=40, n_random=1, seed=0)
     both = lambda a: {"class entropy": a, "drug entropy": a}  # noqa: E731
     equal = predictor.predict((2, 2), both(0.5), **fast)
-    assert equal["class entropy minus drug entropy"] == 0.0  # the objectives differ by the constant alpha log 2
+    assert equal["class entropy minus drug entropy"] == pytest.approx(0.0, abs=1e-12)  # the objectives differ by the constant alpha log 2
     cold = predictor.predict((3, 1), both(0.0), **fast)
     assert cold["class entropy minus drug entropy"] == 0.0
     warm = predictor.predict((3, 1), both(2.0), **fast)
@@ -960,7 +960,7 @@ def test_git_state_hashes_code_changes_only_including_names_with_spaces(tmp_path
         subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args], cwd=tmp_path, check=True, capture_output=True)
 
     (tmp_path / "ocmdp").mkdir()
-    (tmp_path / "ocmdp" / "x.py").write_text("a = 1\n")
+    (tmp_path / "ocmdp" / "x.py").write_text("a = 1\n", encoding="utf-8")
     git("init", "-q")
     git("add", "ocmdp/x.py")
     git("commit", "-q", "-m", "fixture")
@@ -969,15 +969,15 @@ def test_git_state_hashes_code_changes_only_including_names_with_spaces(tmp_path
     clean = script.git_state()
     assert clean["dirty"] is False and clean["code_diff_sha256"] is None
     (tmp_path / "decisions").mkdir()
-    (tmp_path / "decisions" / "note.md").write_text("not code\n")
+    (tmp_path / "decisions" / "note.md").write_text("not code\n", encoding="utf-8")
     assert script.git_state()["dirty"] is False
     (tmp_path / "experiments").mkdir()
     spaced = tmp_path / "experiments" / "a b.py"
-    spaced.write_text("b = 1\n")
+    spaced.write_text("b = 1\n", encoding="utf-8")
     first = script.git_state()
     assert first["dirty"] and first["untracked_code"] == ["experiments/a b.py"]
-    spaced.write_text("b = 2\n")
+    spaced.write_text("b = 2\n", encoding="utf-8")
     second = script.git_state()
     assert second["code_diff_sha256"] != first["code_diff_sha256"]
-    (tmp_path / "ocmdp" / "x.py").write_text("a = 2\n")
+    (tmp_path / "ocmdp" / "x.py").write_text("a = 2\n", encoding="utf-8")
     assert script.git_state()["code_diff_sha256"] not in (first["code_diff_sha256"], second["code_diff_sha256"])

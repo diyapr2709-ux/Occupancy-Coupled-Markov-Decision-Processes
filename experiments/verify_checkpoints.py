@@ -18,7 +18,7 @@ from pathlib import Path
 
 def verify(report_path: Path, load: bool = False) -> list[str]:
     """Every missing file, size or hash mismatch, and (with load) weight-hash mismatch, as one line each."""
-    report = json.loads(report_path.read_text())
+    report = json.loads(report_path.read_text(encoding="utf-8"))
     problems = []
     for run in report["runs"]:
         entries = run.get("checkpoints", [])
@@ -49,7 +49,7 @@ def main() -> int:
     problems = verify(args.report, args.load)
     for problem in problems:
         print(problem)
-    count = sum(len(run.get("checkpoints", [])) for run in json.loads(args.report.read_text())["runs"])
+    count = sum(len(run.get("checkpoints", [])) for run in json.loads(args.report.read_text(encoding="utf-8"))["runs"])
     print(f"{count} checkpoints, {len(problems)} problems")
     return 1 if problems else 0
 

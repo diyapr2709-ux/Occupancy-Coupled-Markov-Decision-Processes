@@ -40,7 +40,7 @@ REPLANNER = "oracle[replans every quarter]"
 def _load(paths: list[Path]) -> list[dict]:
     reports = []
     for path in paths:
-        report = json.loads(path.read_text())
+        report = json.loads(path.read_text(encoding="utf-8"))
         report["_path"] = str(path)
         reports.append(report)
     return reports

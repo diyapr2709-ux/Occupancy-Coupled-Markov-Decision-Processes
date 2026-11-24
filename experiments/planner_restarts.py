@@ -74,7 +74,7 @@ def main() -> int:
         "spread_share_of_gain_over_uniform": spread / gain,
     }
     path = args.out / f"planner_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
-    path.write_text(json.dumps(report, indent=2))
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(f"{n_drugs} drugs, {args.mechanisms} mechanisms; {args.steps} steps, {args.random_starts} random starts")
     print(f"  uniform mixing            {uniform:.5f}")
