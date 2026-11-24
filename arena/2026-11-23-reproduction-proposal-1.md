@@ -151,12 +151,12 @@ Sources:
 - https://www.biorxiv.org/content/10.64898/2025.12.18.695270.full.pdf
 
 Repository files read:
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-reproduction-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-23-application-queries.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-23-reviewer-leads.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-prior-art-antibiotic-rl.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/seeds.yaml
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/budget.yaml
+- arena/2026-11-23-reproduction-criteria.md
+- inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
+- inbox/2026-11-23-application-queries.md
+- inbox/2026-11-23-reviewer-leads.md
+- inbox/2026-11-16-prior-art-antibiotic-rl.md
+- seeds.yaml
+- budget.yaml
 
 Nothing was written and no code was run.

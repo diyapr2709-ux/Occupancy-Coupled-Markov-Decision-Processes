@@ -2,7 +2,7 @@
 
 **Proposal: the temperature protocol for comparing OC-SAC and SAC (arena/2026-11-23-temperature-criteria.md)**
 
-I wrote nothing to the repository. Everything below comes from reading the files the arena lists. The only figures I quote are from /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261123_190717_20498.json.
+I wrote nothing to the repository. Everything below comes from reading the files the arena lists. The only figures I quote are from runs/train/train_20261123_190717_20498.json.
 
 ## 0. What the code shows, beyond the given facts
 
@@ -141,12 +141,12 @@ I wrote nothing to the repository. Everything below comes from reading the files
 - arXiv 2103.06257: the robustness reading of maximum-entropy RL. Robustness appears only at relatively large coefficients. Whether its bound assumes a fixed coefficient was not checked.
 
 Relevant files:
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/oc_sac.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/losses.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/components/policy_head.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/train_agent.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261123_190717_20498.json
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261123_190750_20538.json
+- ocmdp/agents/oc_sac.py
+- ocmdp/agents/losses.py
+- ocmdp/components/policy_head.py
+- experiments/train_agent.py
+- runs/train/train_20261123_190717_20498.json
+- runs/train/train_20261123_190750_20538.json
 
 Sources:
 - [arXiv 2406.05953 (html)](https://arxiv.org/html/2406.05953v1)

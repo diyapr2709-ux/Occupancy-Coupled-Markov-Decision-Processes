@@ -30,11 +30,16 @@ def _incomplete_beta(x: float, a: float, b: float) -> float:
 
 
 def t_quantile(probability: float, df: int) -> float:
-    """The `probability` quantile of Student's t with df degrees of freedom (probability above 1/2), by bisection on its CDF."""
+    """The `probability` quantile of Student's t with df degrees of freedom, for 1/2 < probability < 1, by bisection on its CDF."""
+    if not 0.5 < probability < 1.0 or df < 1:
+        raise ValueError(f"need 1/2 < probability < 1 and df >= 1, got probability {probability} and df {df}")
+
     def upper_tail(t: float) -> float:
         return 0.5 * _incomplete_beta(df / (df + t * t), df / 2.0, 0.5)
 
-    lo, hi = 0.0, 1000.0
+    lo, hi = 0.0, 1.0
+    while upper_tail(hi) > 1.0 - probability:  # widen until the quantile is bracketed: heavy tails at small df
+        hi *= 2.0
     for _ in range(200):
         mid = (lo + hi) / 2.0
         lo, hi = (mid, hi) if upper_tail(mid) > 1.0 - probability else (lo, mid)

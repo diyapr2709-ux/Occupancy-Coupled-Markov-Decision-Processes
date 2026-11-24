@@ -5,14 +5,15 @@
 
 Each report fixes (kappa, delta, horizon) and holds lines: one per (delay, lam), with a
 sigma grid. Along a line the contrast (a policy pair from sweep_phase_diagram.CONTRASTS,
-named in the predictions file) is averaged over episodes per sigma, and its first sign
-change, linearly interpolated, is the measured crossing sigma_hat. The error of a line
-is |log(sigma_hat / sigma_pred)|, with crossings outside the grid censored at its ends.
-Which end is set by the contrast's sign beyond its crossing, stated once for the whole
-contrast: a line that shows that sign at every sigma crossed below the grid (placed at
-the smallest positive sigma), one that never shows it crosses above it (placed at the
-largest). Two predictions or measurements outside the grid on the same side agree. The
-statistic is E, the median error over lines.
+named in the predictions file) is averaged over episodes per sigma. The measured
+crossing sigma_hat is where it takes, for good, the sign stated for the whole contrast
+as its sign beyond the crossing, linearly interpolated. The error of a line is
+|log(sigma_hat / sigma_pred)|, with measured and predicted crossings alike censored to
+the part of the grid that can resolve them: a line that shows that sign at every sigma
+crossed below the grid (placed at the smallest positive sigma), one that does not end in
+it crosses above it (placed at the largest), and numeric crossings outside that range
+are clamped to it. Two crossings censored on the same side agree. The statistic is E,
+the median error over lines. Every report must share its evaluation episodes.
 
 Uncertainty: episodes are resampled jointly across every cell of every line, which keeps
 the pairing of policies within a cell and of cells sharing an evaluation seed. E's 95%
@@ -46,6 +47,9 @@ def measured_lines(reports: list[dict], contrast: str) -> tuple[dict[Line, tuple
     """Line -> (sigma grid, per-episode contrast of shape (sigmas, episodes)), and the common episode count."""
     minuend, subtrahend = CONTRASTS[contrast]
     lines, episodes = {}, None
+    seeds = {json.dumps(report.get("evaluation_episode_seeds")) for report in reports}
+    if len(seeds) > 1:
+        raise ValueError("every report must use the same evaluation episodes (evaluation_episode_seeds differ)")
     for report in reports:
         inst = report["instance"]
         raw = {(r["delay"], r["lam"], r["sigma"], r["policy"]): np.asarray(r["expected_failure_rate"]) for r in report["results"]}
@@ -60,38 +64,49 @@ def measured_lines(reports: list[dict], contrast: str) -> tuple[dict[Line, tuple
     return lines, episodes
 
 
-def crossing(sigmas: np.ndarray, means: np.ndarray) -> tuple[float | None, int]:
-    """First sign change of means along sigmas, and the last nonzero sign.
+def crossing(sigmas: np.ndarray, means: np.ndarray, beyond: int) -> tuple[float | None, int]:
+    """Where the contrast takes the sign `beyond` for good, and the sign of its last nonzero mean.
 
-    Between consecutive nonzero means of opposite sign the crossing is an exact zero lying
-    between them if there is one, else the linear interpolation. A crossing at or below
-    zero is reported as None, i.e. below the grid.
+    The crossing is the last change into `beyond` along sigmas, after which the contrast
+    keeps that sign, so a line that dips and recovers is placed where it settles. Between
+    the two nonzero means around it the crossing is an exact zero lying between them if
+    there is one, else the linear interpolation. None when every nonzero mean already has
+    the sign `beyond` (crossed below the grid) or the last one does not (not yet crossed);
+    a line with no nonzero mean has sign 0 and so never shows `beyond`.
     """
     nonzero = [(s, m) for s, m in zip(sigmas, means) if m != 0]
-    last_sign = int(np.sign(nonzero[-1][1])) if nonzero else 1
-    for (s0, m0), (s1, m1) in zip(nonzero, nonzero[1:]):
-        if np.sign(m0) != np.sign(m1):
-            zeros = [s for s, m in zip(sigmas, means) if m == 0 and s0 < s < s1]
-            at = zeros[0] if zeros else s0 + (s1 - s0) * m0 / (m0 - m1)
-            if at > 0:
-                return float(at), last_sign
-    return None, last_sign
+    if not nonzero:
+        return None, 0
+    last_sign = int(np.sign(nonzero[-1][1]))
+    before = [i for i, (_, m) in enumerate(nonzero) if np.sign(m) != beyond]
+    if last_sign != beyond or not before:
+        return None, last_sign
+    (s0, m0), (s1, m1) = nonzero[before[-1]], nonzero[before[-1] + 1]
+    zeros = [s for s, m in zip(sigmas, means) if m == 0 and s0 < s < s1]
+    return float(zeros[0] if zeros else s0 + (s1 - s0) * m0 / (m0 - m1)), last_sign
 
 
 def line_error(sigmas: np.ndarray, measured: tuple[float | None, int], predicted: tuple[float | None, int], beyond: int) -> float:
-    """|log ratio| of measured to predicted crossing, censored at the grid ends; `beyond` is the sign past the crossing."""
+    """|log ratio| of measured to predicted crossing, both censored to what the grid can resolve.
+
+    A crossing at or below the smallest positive sigma cannot be told from one below the
+    grid, nor one at or above the largest sigma from one beyond it, so measured and
+    predicted crossings alike are clamped to [smallest positive sigma, largest sigma]. A
+    line with no crossing sits at the low end if it already shows the sign `beyond` past
+    the crossing, and at the high end if it does not yet.
+    """
     low, high = float(sigmas[sigmas > 0].min()), float(sigmas.max())
 
     def place(crossing_at: float | None, sign_at_max: int) -> float:
-        if crossing_at is not None:
-            return crossing_at
-        return low if sign_at_max == beyond else high  # already past the crossing everywhere, or not yet anywhere
+        if crossing_at is None:
+            return low if sign_at_max == beyond else high
+        return min(max(crossing_at, low), high)
 
     return abs(math.log(place(*measured) / place(*predicted)))
 
 
 def median_error(lines: dict, means: dict[Line, np.ndarray], predictions: dict[Line, tuple[float | None, int]], beyond: int) -> float:
-    return float(np.median([line_error(lines[k][0], crossing(lines[k][0], means[k]), predictions[k], beyond) for k in predictions]))
+    return float(np.median([line_error(lines[k][0], crossing(lines[k][0], means[k], beyond), predictions[k], beyond) for k in predictions]))
 
 
 def load_predictions(path: Path, lines: dict) -> tuple[str, int, dict[Line, tuple[float | None, int]], list[dict]]:
@@ -125,14 +140,14 @@ def score(lines: dict, episodes: int, predictions: dict, null: dict | None, dire
         if null:
             boot_null.append(median_error(lines, means, null, beyond))
         for d_index, direction in enumerate(directions):
-            for key, value in _direction_shifts(lines, means, direction).items():
+            for key, value in _direction_shifts(lines, means, direction, beyond).items():
                 boot_dir.setdefault((d_index, key), []).append(value)
     e = median_error(lines, point, predictions, beyond)
     lo, hi = np.percentile(boot_e, [2.5, 97.5])
     out = {
         "lines": [
-            {"line": dict(zip(("kappa", "delta", "horizon", "delay", "lam"), k)), "measured_crossing": crossing(lines[k][0], point[k])[0],
-             "predicted_crossing": predictions[k][0], "error": line_error(lines[k][0], crossing(lines[k][0], point[k]), predictions[k], beyond)}
+            {"line": dict(zip(("kappa", "delta", "horizon", "delay", "lam"), k)), "measured_crossing": crossing(lines[k][0], point[k], beyond)[0],
+             "predicted_crossing": predictions[k][0], "error": line_error(lines[k][0], crossing(lines[k][0], point[k], beyond), predictions[k], beyond)}
             for k in predictions
         ],  # fmt: skip
         "E": e,
@@ -146,7 +161,7 @@ def score(lines: dict, episodes: int, predictions: dict, null: dict | None, dire
         out["E_minus_E_null_ci95"] = [float(v) for v in np.percentile(diff, [2.5, 97.5])]
     out["directions"] = []
     for d_index, direction in enumerate(directions):
-        for key, value in _direction_shifts(lines, point, direction).items():
+        for key, value in _direction_shifts(lines, point, direction, beyond).items():
             samples = boot_dir.get((d_index, key), [])
             interval = [float(v) for v in np.percentile(samples, [2.5, 97.5])] if len(samples) == resamples else None
             wrong = interval is not None and ((direction["sign"] > 0 and interval[1] < 0) or (direction["sign"] < 0 and interval[0] > 0))
@@ -156,7 +171,7 @@ def score(lines: dict, episodes: int, predictions: dict, null: dict | None, dire
     return out
 
 
-def _direction_shifts(lines: dict, means: dict, direction: dict) -> dict[tuple[int, float], float]:
+def _direction_shifts(lines: dict, means: dict, direction: dict, beyond: int) -> dict[tuple[int, float], float]:
     """log sigma_hat(to) - log sigma_hat(from) for every (delay, lam) where both settings cross inside the grid."""
     a = (direction["from"]["kappa"], direction["from"]["delta"], direction["from"]["horizon"])
     b = (direction["to"]["kappa"], direction["to"]["delta"], direction["to"]["horizon"])
@@ -167,7 +182,7 @@ def _direction_shifts(lines: dict, means: dict, direction: dict) -> dict[tuple[i
         other = (*b, *key[3:])
         if other not in lines:
             continue
-        x, y = crossing(lines[key][0], means[key])[0], crossing(lines[other][0], means[other])[0]
+        x, y = crossing(lines[key][0], means[key], beyond)[0], crossing(lines[other][0], means[other], beyond)[0]
         if x is not None and y is not None:
             shifts[key[3:]] = math.log(y / x)
     return shifts

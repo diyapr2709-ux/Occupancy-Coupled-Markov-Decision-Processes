@@ -45,4 +45,4 @@ Sub-questions 4 and parts of 6 are partly empirical (for example, one dev run of
 
 ## Material
 
-CLAUDE.md; the plan at /private/tmp/claude-501/-Users-diyap-Occupancy-Coupled-Markov-Decision-Processes/dd0e1ca7-75ac-4fdd-9fa8-5a9faedfa4d9/scratchpad/plan-doc.txt; decisions/2026-11-16.md and decisions/2026-11-23.md; every file in inbox/; README.md; ocmdp/ and experiments/ as needed; the reports in runs/.
+CLAUDE.md; the plan at <a scratch file outside the repository> decisions/2026-11-16.md and decisions/2026-11-23.md; every file in inbox/; README.md; ocmdp/ and experiments/ as needed; the reports in runs/.

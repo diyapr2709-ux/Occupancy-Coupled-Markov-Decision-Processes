@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 import gymnasium as gym
+import math
+
 import numpy as np
 import torch
 
@@ -342,9 +344,35 @@ def distillation_study(
     return out
 
 
-# two-sided 95% Student-t quantiles for 1..30 degrees of freedom; 1.96 beyond
-_T95 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131,
-        2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042)
+def _incomplete_beta(x: float, a: float, b: float) -> float:
+    """Regularised incomplete beta I_x(a, b), by Lentz's continued fraction."""
+    if x <= 0.0 or x >= 1.0:
+        return 0.0 if x <= 0.0 else 1.0
+    if x > (a + 1.0) / (a + b + 2.0):
+        return 1.0 - _incomplete_beta(1.0 - x, b, a)
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)) / a
+    tiny, c, d = 1e-300, 1.0, 1.0 - (a + b) * x / (a + 1.0)
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    f = d
+    for m in range(1, 300):
+        for numerator in (m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m)), -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))):
+            d = 1.0 + numerator * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + numerator / c
+            c = c if abs(c) > tiny else tiny
+            f *= c * d
+        if abs(c * d - 1.0) < 1e-15:
+            break
+    return front * f
+
+
+def _t975(df: int) -> float:
+    """Two-sided 95% Student-t quantile for df degrees of freedom, by bisection on the CDF (exact to about 1e-9)."""
+    lo, hi = 0.0, 1000.0
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        lo, hi = (mid, hi) if 0.5 * _incomplete_beta(df / (df + mid * mid), df / 2.0, 0.5) > 0.025 else (lo, mid)
+    return (lo + hi) / 2.0
 
 
 def aggregate(values) -> dict:
@@ -364,5 +392,5 @@ def aggregate(values) -> dict:
         return {"mean": None, "std": None, "ci95": None, "never": int(v.size)}
     n = finite.size
     std = float(finite.std(ddof=1)) if n > 1 else None
-    ci95 = (_T95[n - 2] if n - 1 <= len(_T95) else 1.96) * std / np.sqrt(n) if n > 1 else None
+    ci95 = _t975(n - 1) * std / np.sqrt(n) if n > 1 else None
     return {"mean": float(finite.mean()), "std": std, "ci95": ci95, "never": int(v.size - finite.size)}

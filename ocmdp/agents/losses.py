@@ -34,7 +34,7 @@ def actor_loss(
     probs:     (B, A) policy after the constraint filter
     q_values:  (B, A) min of the twin reward critics
     reserve_q: (B, A) reserve-critic estimate of discounted option-value loss (higher is worse)
-    alpha:     (B,) state-dependent temperature; treated as a constant here
+    alpha:     (B,) temperature per sample (the agent's one scalar, expanded); treated as a constant here
     xi:        dual variable; treated as a constant here
     entropy:   (B,) H(psi#pi), computed from `probs` so that it carries their gradient
     """

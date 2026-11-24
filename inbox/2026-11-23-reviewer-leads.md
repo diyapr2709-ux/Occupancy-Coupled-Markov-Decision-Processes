@@ -66,3 +66,8 @@ Note: the earlier passes (inbox/2026-11-16-prior-art-*.md) could not be located 
 - Exact claim: MaxEnt RL optimises a lower bound on a robust RL objective, so it is robust to some perturbations of the dynamics and reward; the authors say it is the first rigorous proof of this.
 - Tag: RELATED
 - Reason: no action-history dynamics or entropy over action classes; relevant as an alternative explanation for any robustness gain from entropy under resistance noise.
+
+## Corrections (validator check of the sources, 2026-11-24)
+
+- 2011.06741: the link between rebounding bandits and Max K-Cut is in the paper's body, not its abstract.
+- 2302.08345: the full text's Appendix C appears to link an anonymous code repository. This was seen through a fetch summary and not opened. The d versus sqrt(d) factor in its regret bound was not checked.

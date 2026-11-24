@@ -140,12 +140,12 @@ The decision is partly empirical. Whether the temperatures actually stay off the
 
 ### Files
 
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-temperature-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/oc_sac.py (lines 58–59, 113, 247, 252)
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/losses.py (lines 49–52)
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/train_agent.py (lines 6, 568, 625, 633)
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/tests/test_oc_sac.py:57
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/tests/test_system.py:381,414
+- arena/2026-11-23-temperature-criteria.md
+- ocmdp/agents/oc_sac.py (lines 58–59, 113, 247, 252)
+- ocmdp/agents/losses.py (lines 49–52)
+- experiments/train_agent.py (lines 6, 568, 625, 633)
+- tests/test_oc_sac.py:57
+- tests/test_system.py:381,414
 
 Nothing was written to the repository.
 

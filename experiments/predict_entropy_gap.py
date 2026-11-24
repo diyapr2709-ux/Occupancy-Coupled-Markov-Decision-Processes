@@ -14,9 +14,10 @@ mean-field model, as open-loop schedules of class masses from the nominal start,
     maximise  the same + gamma**q * alpha * sum_j q_qj log n_j                   drug entropy (SAC)
 
 and reports each optimum's undiscounted failure rate and their difference. With
---from-report the temperatures are each agent's median alpha(s) over its evaluation
-states, averaged over seeds, so the prediction is made at the temperatures the agents
-actually reached. Approximations, each a way the prediction can miss: open loop from the
+--from-report the temperatures are each agent's temperature at evaluation (the median
+over evaluation states for reports from the earlier state-dependent temperature),
+averaged over seeds, so the prediction is made at the temperatures the agents actually
+reached. Approximations, each a way the prediction can miss: open loop from the
 nominal start where the agents act on the jittered state; a mixed schedule where the
 agents give one drug per quarter; one temperature where the agents' alpha depends on the
 state. Writes a JSON report to runs/predict/.
@@ -103,12 +104,17 @@ def predict(class_sizes: tuple[int, ...], alphas: dict[str, float], gamma: float
 
 
 def temperatures_from_report(path: Path) -> tuple[tuple[int, ...], dict[str, float], float, float]:
-    """Class sizes, each variant's median evaluation temperature averaged over seeds, gamma and reward scale."""
+    """Class sizes, each variant's evaluation temperature averaged over seeds, gamma and reward scale.
+
+    Reports from agents with a state-dependent temperature store its quantiles over the
+    evaluation states, and the median is used; later reports store the one scalar.
+    """
     report = json.loads(path.read_text(encoding="utf-8"))
     variant_mode = {"oc-sac": "class entropy", "sac": "drug entropy"}
     alphas = {}
     for variant, mode in variant_mode.items():
-        medians = [r["alpha_at_evaluation"]["q50"] for r in report["runs"] if r["variant"] == variant and "alpha_at_evaluation" in r]
+        at_evaluation = [r["alpha_at_evaluation"] for r in report["runs"] if r["variant"] == variant and "alpha_at_evaluation" in r]
+        medians = [a["q50"] if isinstance(a, dict) else a for a in at_evaluation]
         if not medians:
             raise ValueError(f"{path} logs no evaluation temperatures for {variant}")
         alphas[mode] = float(np.mean(medians))

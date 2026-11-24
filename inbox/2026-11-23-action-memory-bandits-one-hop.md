@@ -24,3 +24,5 @@ Queries (arXiv API, export.arxiv.org):
 - https://arxiv.org/abs/2201.12408 (Ou et al., networked restless bandits). RELATED: pulls affect neighbouring arms.
 - https://arxiv.org/abs/2604.03641 (Lee et al., delayed homomorphic RL). RELATED: delayed feedback handled by action-history state augmentation; delay of feedback, not own-history-driven dynamics.
 - https://arxiv.org/abs/2605.04345 (Sintes et al., delayed MARL equivalence). RELATED: action and observation delay equivalence.
+
+Correction (validator check of the source, 2026-11-24): 2604.03641 treats action-history state augmentation as the baseline it improves on, not as its own method.

@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 wandb/
 *.pt
+!runs/train/checkpoints/test/**
 .claude/settings.local.json
 .claude/worktrees/
 CLAUDE.local.md

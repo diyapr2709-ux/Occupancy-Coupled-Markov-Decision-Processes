@@ -17,9 +17,12 @@ Relative to standard discrete SAC:
     weighted by a dual variable xi that ascends on the constraint violation.
 """
 
+import hashlib
+import io
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -39,6 +42,7 @@ from ocmdp.objectives.pushforward_entropy import categorical_entropy, pushforwar
 
 
 TRAIN_SEED_BASE = 1_000_000  # training episodes never share a seed with evaluation episodes (10 000 + protocol seed)
+CHECKPOINT_FORMAT = 1
 
 
 @dataclass(frozen=True)
@@ -58,7 +62,7 @@ class SACConfig:
     alpha: float = 0.0  # the temperature when fixed, in scaled reward per nat
     target_fraction: float = 0.89  # learned target = floor + target_fraction * (maximum - floor) of the reachable entropy
     alpha_init: float = 0.05
-    alpha_lr: float = 3e-4
+    alpha_lr: float | None = None  # None: alpha_lr_for(...), the reachability rule; a number overrides it
     efficacy_threshold: float = 0.6
     reserve_budget: float = 0.05  # bound on the per-quarter expected loss of effective drugs
     dual_lr: float = 0.5
@@ -75,6 +79,30 @@ class SACConfig:
             raise ValueError("need a finite alpha >= 0, alpha_init > 0 and target_fraction strictly between 0 and 1")
         if self.learning_starts < self.batch_size or self.total_quarters <= self.learning_starts:
             raise ValueError("need batch_size <= learning_starts < total_quarters")
+        if self.alpha_lr is None:
+            updates = self.total_quarters - self.learning_starts + 1
+            object.__setattr__(self, "alpha_lr", alpha_lr_for(updates, self.alpha_init, self.log_alpha_range))
+        if not self.alpha_lr > 0:
+            raise ValueError(f"alpha_lr must be positive, got {self.alpha_lr}")
+
+
+def alpha_lr_for(updates: int, alpha_init: float, log_alpha_range: tuple[float, float]) -> float:
+    """The smallest of {1, 2, 3, 5} x 10^k that lets the learned temperature cross its range three times over.
+
+    Adam moves log alpha by at most about its learning rate per update, so over `updates`
+    steps it can travel about lr x updates. The rule asks for three times the distance from
+    log(alpha_init) to the farther clamp edge, so a target anywhere inside the clamp is
+    reachable whatever the run length; it depends on no outcome. With the defaults it gives
+    3e-3 at 12 000 decisions, 2e-3 at 24 000 and 1e-3 at 48 000.
+    """
+    start = math.log(alpha_init)
+    need = 3.0 * max(start - log_alpha_range[0], log_alpha_range[1] - start) / updates
+    exponent = math.floor(math.log10(need))
+    for k in (exponent, exponent + 1):
+        for mantissa in (1, 2, 3, 5):
+            if float(f"{mantissa}e{k}") >= need:
+                return float(f"{mantissa}e{k}")
+    raise AssertionError("unreachable: 1e(k+1) always exceeds need")
 
 
 class QuarterlyChoicePolicy(HeuristicPolicy):
@@ -100,6 +128,7 @@ class Agent(nn.Module):
     def __init__(self, obs_dim: int, embeddings: torch.Tensor, assignment: torch.Tensor, n_mechanisms: int, cfg: SACConfig):
         super().__init__()
         self.cfg = cfg
+        self.obs_dim = obs_dim
         self.n_mechanisms = n_mechanisms
         self.register_buffer("embeddings", embeddings)
         self.register_buffer("assignment", assignment)
@@ -152,7 +181,52 @@ class TrainResult:
     agent: Agent
     episode_failure: list[float] = field(default_factory=list)  # mean expected failure per training episode
     alpha: list[float] = field(default_factory=list)  # mean temperature per update window
+    entropy: list[float] = field(default_factory=list)  # mean batch entropy, in the agent's own entropy space, per update window
     xi: list[float] = field(default_factory=list)
+    checkpoints: list[tuple[int, bytes]] = field(default_factory=list)  # (decisions, checkpoint_bytes) before the end, when asked for
+    parameter_sha256: dict[str, str] = field(default_factory=dict)  # "initial", "after_first_window": where two runs first differ
+
+
+def parameter_sha256(agent: nn.Module) -> str:
+    """SHA-256 over every tensor of the agent's state, names included: equal hashes mean identical weights."""
+    digest = hashlib.sha256()
+    for name, tensor in agent.state_dict().items():
+        digest.update(name.encode() + b"\0" + tensor.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+
+def checkpoint_bytes(agent: Agent, decisions: int) -> bytes:
+    """The agent's weights and what rebuilds it, after `decisions` training decisions; read back by load_checkpoint."""
+    buffer = io.BytesIO()
+    torch.save(
+        {
+            "format": CHECKPOINT_FORMAT,
+            "decisions": decisions,
+            "obs_dim": agent.obs_dim,
+            "n_mechanisms": agent.n_mechanisms,
+            "config": asdict(agent.cfg),
+            "state_dict": agent.state_dict(),
+        },
+        buffer,
+    )
+    return buffer.getvalue()
+
+
+def load_checkpoint(source: bytes | str | Path) -> tuple[Agent, int]:
+    """The agent a checkpoint holds, and the training decisions it had seen.
+
+    Loaded with weights_only, so a checkpoint file can carry tensors and plain values but no
+    code. Rebuilding the agent initialises networks that the saved weights then replace; it
+    runs on a forked random state, so loading leaves torch's global generator untouched.
+    """
+    data = torch.load(io.BytesIO(source) if isinstance(source, bytes) else source, weights_only=True)
+    if data.get("format") != CHECKPOINT_FORMAT:
+        raise ValueError(f"checkpoint format {data.get('format')!r} is not {CHECKPOINT_FORMAT}")
+    state = data["state_dict"]
+    with torch.random.fork_rng(devices=[]):
+        agent = Agent(data["obs_dim"], state["embeddings"], state["assignment"], data["n_mechanisms"], SACConfig(**data["config"]))
+    agent.load_state_dict(state)
+    return agent, data["decisions"]
 
 
 class _Replay:
@@ -176,8 +250,14 @@ class _Replay:
         return {k: torch.as_tensor(getattr(self, k)[idx]) for k in ("obs", "action", "reward", "cost", "next_obs", "done")}
 
 
-def train(env: gym.Env, cfg: SACConfig, seed: int) -> TrainResult:
-    """Train on `env` (a toy environment, optionally wrapped) for cfg.total_quarters decisions."""
+def train(env: gym.Env, cfg: SACConfig, seed: int, checkpoint_every: int | None = None) -> TrainResult:
+    """Train on `env` (a toy environment, optionally wrapped) for cfg.total_quarters decisions.
+
+    With `checkpoint_every`, the agent is also saved after every that many decisions before
+    the last; saving draws no random numbers, so training is the same with or without it.
+    """
+    if checkpoint_every is not None and checkpoint_every < 1:
+        raise ValueError(f"checkpoint_every must be a positive number of decisions, got {checkpoint_every}")
     torch.manual_seed(seed)
     toy = env.unwrapped
     if not toy.config.markov_observation:
@@ -198,9 +278,10 @@ def train(env: gym.Env, cfg: SACConfig, seed: int) -> TrainResult:
     replay = _Replay(min(cfg.buffer_size, cfg.total_quarters), env.observation_space.shape[0])
     rng, sample_rng = policy_rng(seed), np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(3,)))
     result = TrainResult(agent)
+    result.parameter_sha256["initial"] = parameter_sha256(agent)
     chooser = QuarterlyChoicePolicy(agent.choose, toy.action_space.n, "oc-sac")
 
-    episode, decisions, alphas = 0, 0, []
+    episode, decisions, alphas, entropies = 0, 0, [], []
     while decisions < cfg.total_quarters:
         obs, info = env.reset(seed=TRAIN_SEED_BASE + seed * 100_000 + episode)
         chooser.reset()
@@ -217,11 +298,18 @@ def train(env: gym.Env, cfg: SACConfig, seed: int) -> TrainResult:
             replay.add(start_obs, chooser.drug, cfg.reward_scale * reward_sum / n, cost, obs, float(done))
             decisions += 1
             if decisions >= cfg.learning_starts:
-                alphas.append(_update(agent, actor_opt, critic_opt, alpha_opt, dual, replay.sample(cfg.batch_size, sample_rng)))
+                alpha, entropy = _update(agent, actor_opt, critic_opt, alpha_opt, dual, replay.sample(cfg.batch_size, sample_rng))
+                alphas.append(alpha)
+                entropies.append(entropy)
                 if len(alphas) == cfg.dual_update_every:
                     result.alpha.append(float(np.mean(alphas)))
+                    result.entropy.append(float(np.mean(entropies)))
                     result.xi.append(dual.value)
-                    alphas = []
+                    alphas, entropies = [], []
+                    if len(result.alpha) == 1:
+                        result.parameter_sha256["after_first_window"] = parameter_sha256(agent)
+            if checkpoint_every and decisions % checkpoint_every == 0 and decisions < cfg.total_quarters:
+                result.checkpoints.append((decisions, checkpoint_bytes(agent, decisions)))
         result.episode_failure.append(failure_sum / max(steps, 1))
         episode += 1
     return result
@@ -232,7 +320,8 @@ def _check_finite(name: str, value: torch.Tensor) -> None:
         raise FloatingPointError(f"{name} is not finite ({value.item()}); training diverged")
 
 
-def _update(agent: Agent, actor_opt, critic_opt, alpha_opt, dual: DualVariable, batch: dict[str, torch.Tensor]) -> float:
+def _update(agent: Agent, actor_opt, critic_opt, alpha_opt, dual: DualVariable, batch: dict[str, torch.Tensor]) -> tuple[float, float]:
+    """One critic, actor and temperature step; returns the temperature used and the batch's mean policy entropy."""
     cfg = agent.cfg
     obs, next_obs, action = batch["obs"], batch["next_obs"], batch["action"]
     alpha = agent.temperature()
@@ -275,4 +364,4 @@ def _update(agent: Agent, actor_opt, critic_opt, alpha_opt, dual: DualVariable, 
         for target_net, net in ((agent.q1_target, agent.q1), (agent.q2_target, agent.q2), (agent.reserve_target, agent.reserve)):
             for tp, p in zip(target_net.parameters(), net.parameters()):
                 tp.lerp_(p, cfg.tau)
-    return float(alpha)
+    return float(alpha), float(entropy.detach().mean())

@@ -3,7 +3,8 @@
     python experiments/train_agent.py --tier dev                 # 5 seeds x 2 variants x 2 noise levels, in parallel
     python experiments/train_agent.py --tier dev --seeds 0 1 --workers 4
     python experiments/train_agent.py --tier dev --backend modal   # one Modal container per job
-    python experiments/train_agent.py --tier val --set target_fraction=0.77   # hyperparameter selection
+    python experiments/train_agent.py --tier val --platform modal-a --set temperature=fixed alpha=0.1   # one temperature candidate
+    python experiments/train_agent.py --tier val --platform modal-a --checkpoint-every 3000   # also save each agent at 3000, 6000, 9000
     python experiments/train_agent.py --tier dev --class-sizes 8 5 4 2 1   # 20 drugs in 5 unequal mechanism classes
     python experiments/train_agent.py --tier test --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
 
@@ -14,7 +15,31 @@ so nothing tuned on dev or val has seen a test episode. Every policy in a run is
 evaluated on the same episodes (jittered starting states), so differences between
 policies are paired. Agents are evaluated both sampling from their policy and taking
 its most probable drug. Writes a JSON report to runs/train/, which records the tier,
-the preregistration, the git commit, the instance and the entropy targets.
+the preregistration, the git commit, the instance and, per trained agent, its reachable
+entropy range and temperature.
+
+Both agents of a seed train in one job, one after the other, so a pair always shares a
+process or container and its arithmetic. Every trained agent is saved as a checkpoint
+(ocmdp.agents.oc_sac.load_checkpoint reads it), on whichever backend it trained, under
+checkpoints/<tier>/<report name>/ next to the report; the report records each file's
+path relative to its own folder, its SHA-256 and the training decisions it had seen.
+Only test-tier checkpoints are tracked in git; dev and val ones are archived with their
+hashes, and experiments/verify_checkpoints.py checks any folder against its report.
+Intermediate checkpoints (--checkpoint-every) are for checkpoint choice on val only, at
+most three per agent.
+
+Every launch writes launches/<launch id>.json next to its reports before any job starts,
+so a launch that fails or is killed still leaves a record, and the report carries the
+same id. --platform names the account or machine (required for val and test), and each
+job records its host, its arithmetic and hashes of the agent's weights at
+initialisation, after the first update window and at the end: training is chaotic, so
+runs agree seed by seed only where all of these agree. A launch on the test tier is
+refused unless its preregistration is committed and unmodified, approvals/<preregistration
+name>.ok exists, the code is committed, and no earlier launch used that
+preregistration's test seeds: the rules of the repository's tier guard, enforced here
+so they hold on any machine. The preregistration also names the platform its val
+selection ran on (a `platform:` line), and a test launch from any other platform is
+refused, so selection and test share one arithmetic.
 
 The instance is one mechanism class per entry of --class-sizes, each holding that many
 interchangeable drugs; the default, two classes of two, is PairedDrugs. The report
@@ -26,7 +51,7 @@ reported discounted at the agent's gamma, the objective the agent is trained on.
 noise, each agent's critics and actor are checked against counterfactual values of every
 class under the agent's own continuation (`critic`), and with --diagnose-gap its gap to
 the planner is split by cause along its own trajectory (`gap_attribution`). Each agent's
-temperature path, dual-variable path and temperatures at evaluation states are logged.
+temperature path, dual-variable path and temperature at evaluation are logged.
 """
 
 import argparse
@@ -49,6 +74,9 @@ ENV_KWARGS = dict(expected_reward=True, markov_observation=True, r0_spread=0.04,
 ROOT = Path(__file__).resolve().parents[1]
 TIERS = ("dev", "val", "test")
 DEFAULT_SEEDS = 5  # per variant and noise level when --seeds is not given: the first seeds of the tier
+REPORT_SCHEMA = 2  # 2 adds launch records, the platform label, weight hashes and checkpoints
+MODAL_ENV = ("MODAL_TASK_ID", "MODAL_REGION", "MODAL_CLOUD_PROVIDER", "MODAL_IMAGE_ID")  # set inside Modal containers
+_jobs_in_process = 0  # jobs this process (a worker, or a reused Modal container) has started
 VARIANTS = {"oc-sac": {"entropy": "pushforward"}, "sac": {"entropy": "action"}}
 PAIRED_DRUGS = (2, 2)  # class sizes of the default instance
 REPLANNER = "oracle[replans every quarter]"  # the planner to compare against under noise, where none is a bound
@@ -117,11 +145,15 @@ def git_state() -> dict:
         return {"commit": None, "dirty": None, "code_diff_sha256": None, "untracked_code": None}
 
 
-def host() -> dict:
-    """The machine a job ran on. Training is chaotic, so results reproduce only where the arithmetic is identical.
+def host(job_in_process: int | None = None) -> dict:
+    """The machine and process a job ran on. Training is chaotic, so results reproduce only where the arithmetic is identical.
 
     `simd` is the level torch dispatches to, which a pinned environment forces; `cpu` is
-    the model the operating system reports, which a sandboxed container may hide.
+    the model the operating system reports, which a sandboxed container may hide, so the
+    CPU features numpy detects for itself are recorded too. The machine itself is named
+    only by the launch's --platform label: a host name can carry a person's name.
+    `job_in_process` counts the jobs one process or reused container has started, since
+    reuse decides which jobs share arithmetic.
     """
     import torch
 
@@ -131,7 +163,126 @@ def host() -> dict:
             cpu = next((line.split(":", 1)[1].strip() for line in f if line.startswith("model name")), cpu)
     except OSError:
         pass
-    return {"machine": platform.machine(), "cpu": cpu, "simd": torch.backends.cpu.get_cpu_capability()}
+    try:
+        from numpy._core._multiarray_umath import __cpu_features__
+
+        features = sorted(name for name, enabled in __cpu_features__.items() if enabled)
+    except ImportError:
+        features = None
+    return {
+        "machine": platform.machine(),
+        "cpu": cpu,
+        "simd": torch.backends.cpu.get_cpu_capability(),
+        "numpy_cpu_features": features,
+        "torch_threads": torch.get_num_threads(),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cuda_available": torch.cuda.is_available(),
+        "pid": os.getpid(),
+        "job_in_process": job_in_process,
+        "modal": {name: os.environ[name] for name in MODAL_ENV if name in os.environ},
+    }
+
+
+def check_seed_file(parser: argparse.ArgumentParser, tier_name: str, tier: range, seeds_file: Path) -> None:
+    """Stop a launch whose seed file would reach the repository's test seeds from any tier but test.
+
+    --seeds-file may define other tiers, but none of them may overlap the test range of the
+    repository's seeds.yaml, and a test-tier launch must use that file itself.
+    """
+    repository_test = load_tiers(ROOT / "seeds.yaml")["test"]
+    if tier_name == "test":
+        if seeds_file.resolve() != (ROOT / "seeds.yaml").resolve():
+            parser.error("the test tier must use the repository's seeds.yaml")
+    elif tier.start < repository_test.stop and repository_test.start < tier.stop:
+        parser.error(f"the {tier_name} tier of {seeds_file.name} overlaps the repository's test seeds [{repository_test.start}, {repository_test.stop - 1}]")
+
+
+def earlier_test_launches(slug: str, out: Path) -> list[str]:
+    """Ids of earlier test-tier launches of preregistration `slug`, from the launch records under runs/ and `out`."""
+    found = []
+    for record in sorted({*ROOT.glob("runs/*/launches/*.json"), *out.glob("launches/*.json")}):
+        earlier = json.loads(record.read_text(encoding="utf-8"))
+        if earlier.get("tier") == "test" and earlier.get("prereg_slug") == slug:
+            found.append(earlier.get("launch_id"))
+    return found
+
+
+def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git: dict, out: Path, platform_label: str | None) -> str:
+    """The preregistration's name, if a launch on the test tier may go ahead; otherwise stop with the reason.
+
+    The name is the file's own, read after resolving the path, and a link is refused, so
+    one preregistration's approval cannot be borrowed by another.
+    """
+    if prereg is None or not prereg.is_file():
+        parser.error("the test tier needs --prereg pointing at an existing preregistration file")
+    if prereg.is_symlink():
+        parser.error("--prereg must name the preregistration file itself, not a link to it")
+    resolved = prereg.resolve()
+    try:
+        relative = str(resolved.relative_to(ROOT))
+    except ValueError:
+        parser.error(f"--prereg {prereg} must lie inside the repository")
+    if resolved.parent != (ROOT / "preregistrations").resolve():
+        parser.error(f"--prereg must be a file in preregistrations/, got {relative}")
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", relative], cwd=ROOT, capture_output=True).returncode == 0
+    unmodified = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", relative], cwd=ROOT, capture_output=True).returncode == 0
+    if not (tracked and unmodified):
+        parser.error(f"the test tier needs a committed, unmodified preregistration; {relative} is not")
+    slug = resolved.stem
+    named = re.search(r"^platform:\s*(\S+)\s*$", resolved.read_text(encoding="utf-8"), re.M)
+    if named is None:
+        parser.error(f"{relative} must name the platform its val selection ran on, in a `platform:` line")
+    if named.group(1) != platform_label:
+        parser.error(f"{relative} was preregistered for platform {named.group(1)}, not {platform_label}")
+    if git["dirty"] is not False:
+        parser.error("the test tier needs a clean, committed tree, so the report names the exact code that ran")
+    used = earlier_test_launches(slug, out)
+    if used:
+        parser.error(f"the test seeds of {slug} were already used by launch {used[0]}")
+    if not (ROOT / "approvals" / f"{slug}.ok").is_file():
+        parser.error(f"the test tier needs approvals/{slug}.ok, which only the project owner creates")
+    return slug
+
+
+def training_jobs(args: argparse.Namespace, overrides: dict, first_episode: int, instance: tuple) -> list[tuple]:
+    """One train_and_evaluate_pair job per noise level and seed: both agents of a seed in one process or container.
+
+    Containers and workers can differ in arithmetic, and training is chaotic, so a pair
+    split across two of them would differ by more than its entropy space.
+    """
+    return [(s, seed, args.quarters, args.episodes, overrides, first_episode, instance, args.diagnose_gap, args.checkpoint_every)
+            for s in args.sigmas for seed in args.seeds]  # fmt: skip
+
+
+def train_and_evaluate_pair(job: tuple) -> list[dict]:
+    """Both variants of one (noise level, seed), trained and evaluated one after the other in this process."""
+    sigma, seed, *rest = job
+    return [train_and_evaluate((variant, sigma, seed, *rest)) for variant in VARIANTS]
+
+
+def launch_arguments(args: argparse.Namespace) -> dict:
+    """The command-line arguments as recorded: paths inside the repository relative to it, so no machine's directories appear."""
+    def recorded(value):
+        if isinstance(value, Path):
+            resolved = value.resolve()
+            return str(resolved.relative_to(ROOT)) if resolved.is_relative_to(ROOT) else f"<outside the repository>/{value.name}"
+        return value
+
+    return {k: recorded(v) for k, v in vars(args).items()}
+
+
+def prereg_digest(prereg: Path | None) -> str | None:
+    """SHA-256 of the preregistration, read at launch so the record names the file as it stood when the run began."""
+    return hashlib.sha256(prereg.read_bytes()).hexdigest() if prereg else None
+
+
+def record_launch(out: Path, launch_id: str, args: dict, git: dict, backend: str, prereg_slug: str | None, prereg_sha256: str | None) -> None:
+    """Write launches/<launch_id>.json before any job starts, so a launch that never finishes still leaves a record."""
+    folder = out / "launches"
+    folder.mkdir(parents=True, exist_ok=True)
+    record = {"launch_id": launch_id, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tier": args["tier"], "platform": args["platform"],
+              "backend": backend, "prereg_slug": prereg_slug, "prereg_sha256": prereg_sha256, "git": git, "args": args}  # fmt: skip
+    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
 def _rollouts(env, policy, episodes: int, first_episode: int) -> list:
@@ -177,7 +328,7 @@ def _policy_entropy(probs: np.ndarray, classes: list[tuple[int, ...]]) -> dict:
 
 
 def soft_returns(reward: np.ndarray, bonus: np.ndarray, gamma: float) -> np.ndarray:
-    """(E, Q) per-quarter rewards and entropy bonuses alpha(s) H -> (E, Q) realised soft return from each decision.
+    """(E, Q) per-quarter rewards and entropy bonuses alpha H -> (E, Q) realised soft return from each decision.
 
     The return the reward critics are trained to predict for the drug chosen at quarter
     q: that quarter's reward, then every later quarter's reward plus its entropy bonus,
@@ -272,7 +423,11 @@ def _planned_failure(snapshot, first_drug: int | None = None, planner_steps: int
 
     Optionally `first_drug` is given for the rest of the current quarter first. The
     planner plans once from the state it starts in, on a copy of the environment, so the
-    snapshot is left untouched. Exact without noise, where the model replays the environment.
+    snapshot is left untouched. A mixed plan is sampled patient by patient, so the planner's
+    random stream restarts where it takes over: the planner's value of a state is then
+    the same whether the state is a snapshot or reached through `first_drug`, which is
+    what lets the losses of _gap_attribution telescope. Without noise the model replays
+    the environment, but the value is still one sample of how a mixed plan is realised.
     """
     from ocmdp.baselines.oracle import FullInformationOracle
     from ocmdp.components.constraint_filter import sample_feasible
@@ -288,6 +443,7 @@ def _planned_failure(snapshot, first_drug: int | None = None, planner_steps: int
         while not done and info["quarter"] == quarter:
             obs, reward, terminated, truncated, info = env.step(sample_feasible(np.eye(env.action_space.n)[first_drug], info["action_mask"], rng))
             total, done = total - reward, terminated or truncated
+    rng = np.random.default_rng(0)
     planner = FullInformationOracle(env, replan_every=toy.config.horizon_quarters, steps=planner_steps, name="planned-once")
     while not done:
         obs, reward, terminated, truncated, info = env.step(planner.act(obs, info, rng))
@@ -305,11 +461,15 @@ def _gap_attribution(agent, snapshots: list, observations: np.ndarray, chosen: n
     is better) telescope along each episode to the agent's gap to the planner on it, which
     `closure_error` checks. Each loss splits into what one drug per quarter costs against a
     plan that may mix (V* against the best Q*) and the choice of a worse class, and the
-    choice loss is attributed, in this order, to the agent's own continuation ranking
-    classes differently from the planner (a local optimum of its own policy), the critics
-    misranking classes against that continuation, or the actor departing from its critics.
-    All values are in expected-failure-rate units and are relative to the planner, which is
-    the best schedule it finds, not a proven optimum.
+    choice loss is attributed, in this order, to the first link that fails: the agent's own
+    continuation ranking classes differently from the planner, the critics misranking
+    classes against that continuation, or the class taken departing from the critics'.
+    The split depends on that order. The first link also counts the difference between the
+    agent's discounted soft objective and the planner's undiscounted failure, not only a
+    local optimum of the agent's policy; the last includes ordinary sampling from a
+    stochastic policy. All values are in expected-failure-rate units and are relative to
+    the planner, which is the best schedule it finds, not a proven optimum; each planner
+    value is one realisation of how a mixed plan is sampled patient by patient.
     """
     import torch
 
@@ -332,7 +492,7 @@ def _gap_attribution(agent, snapshots: list, observations: np.ndarray, chosen: n
             taken = owner[int(chosen[i])]
             totals["policy_class"] += q_star.min() - planned[k]
             choice_loss = q_star[taken] - q_star.min()
-            if choice_loss > 0:
+            if choice_loss > 1e-12:  # rounding in a tie between classes is not a choice
                 if q_own.argmax() != q_star.argmin():
                     totals["continuation_ranks_differently"] += choice_loss
                 elif critic_rank[i] != q_own.argmax():
@@ -351,20 +511,22 @@ def _gap_attribution(agent, snapshots: list, observations: np.ndarray, chosen: n
     }
 
 
-def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, bool]) -> dict:
-    variant, sigma, seed, total_quarters, episodes, overrides, first_episode, instance, diagnose = job
+def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, bool, int | None]) -> dict:
+    variant, sigma, seed, total_quarters, episodes, overrides, first_episode, instance, diagnose, checkpoint_every = job
     import torch
 
-    from ocmdp.agents.oc_sac import QuarterlyChoicePolicy, SACConfig, train
+    from ocmdp.agents.oc_sac import QuarterlyChoicePolicy, SACConfig, checkpoint_bytes, parameter_sha256, train
 
+    global _jobs_in_process
+    _jobs_in_process += 1
     torch.set_num_threads(1)
     env = make_env(sigma, *instance)
     cfg = SACConfig(**{"total_quarters": total_quarters, **overrides, **VARIANTS[variant]})
     start = time.time()
     try:
-        result = train(env, cfg, seed)
+        result = train(env, cfg, seed, checkpoint_every)
     except FloatingPointError as exc:
-        return {"variant": variant, "sigma": sigma, "seed": seed, "host": host(), "diverged": str(exc)}
+        return {"variant": variant, "sigma": sigma, "seed": seed, "host": host(_jobs_in_process), "diverged": str(exc)}
     agent = result.agent
     observations, snapshots, chosen = [], [], []  # every quarterly decision of the sampled evaluation, in order
 
@@ -382,25 +544,37 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, b
     # with noise each counterfactual follows one noise path, which a single draw cannot separate from the critic's error
     critic = _critic_check(agent, snapshots, observations, classes) if sigma == 0 else {}
     gap = _gap_attribution(agent, snapshots, observations, chosen, logs, classes) if diagnose and sigma == 0 else {}
-    alpha = float(agent.temperature())  # one scalar temperature, the same at every evaluation state
     return {
         "variant": variant,
         "sigma": sigma,
         "seed": seed,
         "seconds": time.time() - start,
-        "host": host(),
+        "host": host(_jobs_in_process),
+        "parameter_sha256": {**result.parameter_sha256, "final": parameter_sha256(agent)},
         "learning_curve": [float(np.mean(result.episode_failure[i : i + 25])) for i in range(0, len(result.episode_failure), 25)],
         **_episode_stats(env, logs, cfg.gamma),
         "policy_entropy": _policy_entropy(np.stack([agent.probs(obs) for obs in observations]), env.unwrapped.coupling.identical_row_classes()),
         "critic": critic,
         "gap_attribution": gap,
         "alpha_path": result.alpha,  # mean temperature over each window of dual_update_every updates
+        "entropy_path": result.entropy,  # mean batch entropy in the agent's own entropy space, same windows
         "xi_path": result.xi,
-        # quantiles over evaluation states, kept so readers of reports from the per-state temperature still apply
-        "alpha_at_evaluation": {f"q{q}": alpha for q in (10, 50, 90)},
-        "entropy_range_nats": {"floor": agent.entropy_floor, "max": agent.entropy_max, "target": agent.entropy_target},
+        "alpha_at_evaluation": float(agent.temperature()),
+        "entropy_range": {"floor": agent.entropy_floor, "maximum": agent.entropy_max, "target": agent.entropy_target},
         "argmax": _episode_stats(env, _rollouts(env, argmax, episodes, first_episode), cfg.gamma),
+        "checkpoints": [*result.checkpoints, (cfg.total_quarters, checkpoint_bytes(agent, cfg.total_quarters))],
     }
+
+
+def write_checkpoints(out: Path, tier: str, report_name: str, run: dict) -> list[dict]:
+    """Write a run's checkpoints to out/checkpoints/<tier>/<report_name>/ and return what the report records about each."""
+    written = []
+    for decisions, blob in run.pop("checkpoints", []):
+        relative = Path("checkpoints") / tier / report_name / f"{run['variant']}_sigma{run['sigma']}_seed{run['seed']}_q{decisions}.pt"
+        (out / relative).parent.mkdir(parents=True, exist_ok=True)
+        (out / relative).write_bytes(blob)
+        written.append({"path": str(relative), "decisions": decisions, "sha256": hashlib.sha256(blob).hexdigest(), "bytes": len(blob)})
+    return written
 
 
 def committed_per_quarter(base):
@@ -472,7 +646,9 @@ def two_level_bootstrap_ci95(differences: np.ndarray, resamples: int = 10_000, s
     Every seed is evaluated on the same episodes, so seeds and episodes are crossed, not
     nested: each resample draws seeds and episodes independently and keeps the same
     episodes for every drawn seed, so an effect shared by an episode across seeds keeps
-    its full weight. Resampling seeds alone treats the evaluation episodes as fixed.
+    its full weight. Resampling seeds alone treats the evaluation episodes as fixed. Where
+    seed variance dominates, as in every logged report, a synthetic check put its coverage
+    at about 0.86 to 0.88 with five seeds, so the t interval over seeds stays primary.
     """
     d = np.asarray(differences, dtype=float)
     rng = np.random.default_rng(seed)
@@ -511,7 +687,7 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
             "critic": {k: float(np.mean([r["critic"][k] for r in done])) for k in done[0]["critic"]} if done else {},
             "gap_attribution": {k: float(np.mean([r["gap_attribution"][k] for r in done])) for k in done[0]["gap_attribution"]} if done else {},
             "alpha_last_training_window": aggregate([r["alpha_path"][-1] for r in done if r["alpha_path"]]) if any(r["alpha_path"] for r in done) else None,
-            "alpha_median_at_evaluation": aggregate([r["alpha_at_evaluation"]["q50"] for r in done]) if done else None,
+            "alpha_at_evaluation": aggregate([r["alpha_at_evaluation"] for r in done]) if done else None,
             "minus_baseline_paired_by_episode": {
                 name: aggregate([np.mean(np.asarray(r["expected_failure_rate"]) - base[name]) for r in done]) for name in base
             },
@@ -543,9 +719,16 @@ def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str]) -> dict:
     defaults, overrides = asdict(SACConfig()), {}
     for pair in pairs:
         key, _, value = pair.partition("=")
-        if key not in defaults or not isinstance(defaults[key], (int, float)) or not value:
-            parser.error(f"--set takes KEY=VALUE for a numeric SACConfig field other than entropy, got {pair!r}")
-        overrides[key] = type(defaults[key])(value)
+        if key == "entropy" or type(defaults.get(key)) not in (int, float, str) or not value:
+            parser.error(f"--set takes KEY=VALUE for a numeric SACConfig field or temperature (entropy is set per variant), got {pair!r}")
+        try:
+            overrides[key] = type(defaults[key])(value)
+        except ValueError:
+            parser.error(f"--set {key} needs a {type(defaults[key]).__name__}, got {value!r}")
+    try:
+        SACConfig(**overrides)
+    except ValueError as exc:
+        parser.error(f"--set: {exc}")
     return overrides
 
 
@@ -553,6 +736,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier", choices=TIERS, required=True, help="seed tier: fixes the allowed training seeds and the evaluation episodes")
     parser.add_argument("--prereg", type=Path, help="preregistration this run belongs to; required for --tier test")
+    parser.add_argument("--platform", help="label for the account or machine the jobs run on, not a personal name; required for val and test")
     parser.add_argument("--seeds", type=int, nargs="+", help=f"training seeds inside the tier (default: its first {DEFAULT_SEEDS})")
     parser.add_argument("--seeds-file", type=Path, default=ROOT / "seeds.yaml", help="tier definitions")
     parser.add_argument("--sigmas", type=float, nargs="+", default=[0.0, 0.2])
@@ -566,6 +750,7 @@ def main() -> int:
     parser.add_argument("--equivalence-margin", type=float, help="margin of a two one-sided test on the paired difference (none by default)")
     parser.add_argument("--diagnose-gap", action="store_true", help="attribute each agent's gap to the planner (no noise only; about 3 plans per decision)")
     parser.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE", help="SACConfig overrides, applied to both variants")
+    parser.add_argument("--checkpoint-every", type=int, metavar="Q", help="also save each agent every Q training decisions (the final agent is always saved)")
     parser.add_argument("--out", type=Path, default=Path("runs/train"))
     args = parser.parse_args()
     if args.out.exists() and not args.out.is_dir():
@@ -575,6 +760,7 @@ def main() -> int:
         tier = load_tiers(args.seeds_file)[args.tier]
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
+    check_seed_file(parser, args.tier, tier, args.seeds_file)
     if args.seeds is None:
         args.seeds = list(tier[:DEFAULT_SEEDS])
     outside = sorted(set(args.seeds) - set(tier))
@@ -582,16 +768,26 @@ def main() -> int:
         parser.error(f"--seeds must be distinct and inside the {args.tier} tier [{tier.start}, {tier.stop - 1}]; rejected: {outside or 'duplicates'}")
     if not 1 <= args.episodes <= len(tier):
         parser.error(f"--episodes must lie in [1, {len(tier)}]: evaluation episodes are drawn from the {args.tier} tier")
-    if args.tier == "test" and (args.prereg is None or not args.prereg.is_file()):
-        parser.error("--tier test needs --prereg pointing at an existing preregistration file")
     if len(args.class_sizes) < 2 or min(args.class_sizes) < 1:
         parser.error("--class-sizes needs at least two classes of at least one drug each")
     if args.equivalence_margin is not None and not args.equivalence_margin > 0:
         parser.error("--equivalence-margin must be positive")
     if (args.delay is not None and args.delay < 0) or (args.lam is not None and not 0.0 <= args.lam < 1.0):
         parser.error("--delay must be non-negative and --lam must lie in [0, 1)")
+    if args.checkpoint_every is not None and (args.tier != "val" or not args.quarters / 4 <= args.checkpoint_every < args.quarters):
+        parser.error("--checkpoint-every is for checkpoint choice on val only, in [--quarters / 4, --quarters): at most three per agent")
     overrides = _parse_overrides(parser, args.set)
     git = git_state()  # read at launch: the tree may change while the run is in progress
+    prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform) if args.tier == "test" else None
+    if args.tier != "dev" and not args.platform:
+        parser.error(f"--tier {args.tier} needs --platform naming the account or machine the jobs run on")
+    if args.tier == "val" and git["dirty"] is not False:
+        print("warning: a val-tier launch from uncommitted code; only code_diff_sha256 identifies what ran", file=sys.stderr)
+    launch_id = f"train_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    path = args.out / f"{launch_id}.json"
+    launch_args = launch_arguments(args)
+    prereg_sha256 = prereg_digest(args.prereg)
+    record_launch(args.out, launch_id, launch_args, git, args.backend, prereg_slug, prereg_sha256)
 
     from ocmdp.agents.oc_sac import SACConfig
     from ocmdp.eval.seeds import eval_seed
@@ -599,17 +795,16 @@ def main() -> int:
     config = SACConfig(**{"total_quarters": args.quarters, **overrides})
     sizes = tuple(args.class_sizes)
     instance = (sizes, args.delay, args.lam)
-    jobs = [(v, s, seed, args.quarters, args.episodes, overrides, tier.start, instance, args.diagnose_gap)
-            for s in args.sigmas for v in VARIANTS for seed in args.seeds]  # fmt: skip
+    jobs = training_jobs(args, overrides, tier.start, instance)
     baseline_jobs = [(s, args.episodes, tier.start, instance, config.gamma) for s in args.sigmas]
     if args.backend == "modal":
         import modal_backend
 
         backend = modal_backend.description()
         calls = [("train_agent", "evaluate_baselines", job) for job in baseline_jobs]
-        calls += [("train_agent", "train_and_evaluate", job) for job in jobs]
+        calls += [("train_agent", "train_and_evaluate_pair", job) for job in jobs]
         results = modal_backend.run_jobs(calls)
-        baseline_results, runs = results[: len(baseline_jobs)], results[len(baseline_jobs) :]
+        baseline_results, runs = results[: len(baseline_jobs)], [run for pair in results[len(baseline_jobs) :] for run in pair]
     else:
         from importlib.metadata import version
 
@@ -617,27 +812,29 @@ def main() -> int:
                    "packages": {name: version(name) for name in ("numpy", "torch", "gymnasium")}}  # fmt: skip
         with ProcessPoolExecutor(args.workers) as pool:
             baseline_futures = [pool.submit(evaluate_baselines, job) for job in baseline_jobs]
-            runs = list(pool.map(train_and_evaluate, jobs))
+            runs = [run for pair in pool.map(train_and_evaluate_pair, jobs) for run in pair]
             baseline_results = [f.result() for f in baseline_futures]
     baselines = {result["sigma"]: result["baselines"] for result in baseline_results}
+    for run in runs:
+        run["checkpoints"] = write_checkpoints(args.out, args.tier, path.stem, run)
 
     toy = make_env(0.0, *instance).unwrapped
-    # the range depends only on the instance and the variant, so every run of a variant records the same one
-    entropy_range = {v: next((r["entropy_range_nats"] for r in runs if r["variant"] == v and "entropy_range_nats" in r), None) for v in VARIANTS}
     report = {
-        "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        "report_schema": REPORT_SCHEMA,
+        "launch_id": launch_id,
+        "platform": args.platform,
+        "prereg_sha256": prereg_sha256,
+        "args": launch_args,
         "git": git,
         "backend": backend,
         "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
         "instance": {k: v for k, v in asdict(toy.config).items() if k != "resistance_noise"},
         "class_structure": {"class_sizes": list(sizes), "imbalance_kl_nats": imbalance_kl(sizes)},
-        "entropy_range_nats": entropy_range,
         "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides, **VARIANTS[v]})) for v in VARIANTS},
         "runs": runs,
         "baselines": {str(s): baselines[s] for s in args.sigmas},  # per-episode values, so every contrast can be recomputed
     }
     report["summary"] = {str(s): summarise(runs, baselines[s], s, args.equivalence_margin) for s in args.sigmas}
-    path = args.out / f"train_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     for sigma in args.sigmas:
@@ -666,7 +863,7 @@ def main() -> int:
         print(f"  failure rate discounted at {config.gamma} per quarter: " + "   ".join(f"{name} {agg['mean']:.4f}" for name, agg in discounted.items()))
         for variant in VARIANTS:
             critic, row = summary[variant]["critic"], summary[variant]
-            alpha = row["alpha_median_at_evaluation"]["mean"] if row["alpha_median_at_evaluation"] else float("nan")
+            alpha = row["alpha_at_evaluation"]["mean"] if row["alpha_at_evaluation"] else float("nan")
             versus = row["minus_baseline_paired_by_episode"][REPLANNER]
             if row["gap_attribution"]:
                 g = row["gap_attribution"]
@@ -680,7 +877,7 @@ def main() -> int:
             print(
                 f"  {variant}: critic ranks the best class first in {critic['critic_ranks_best_class_first']:.0%} of states,"
                 f" actor in {critic['actor_ranks_best_class_first']:.0%}; regret critic {critic['critic_choice_regret']:.3f},"
-                f" actor {critic['actor_choice_regret']:.3f} (mean gap {critic['mean_gap_best_to_second']:.3f}); median alpha at evaluation {alpha:.2e};"
+                f" actor {critic['actor_choice_regret']:.3f} (mean gap {critic['mean_gap_best_to_second']:.3f}); alpha at evaluation {alpha:.2e};"
                 f" minus {REPLANNER} {versus['mean']:+.4f} ± {versus['ci95'] or 0:.4f}"
             )
     print(f"\nReport: {path}")
