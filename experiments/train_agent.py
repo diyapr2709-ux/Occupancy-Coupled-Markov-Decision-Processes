@@ -219,7 +219,7 @@ def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git:
         parser.error("--prereg must name the preregistration file itself, not a link to it")
     resolved = prereg.resolve()
     try:
-        relative = str(resolved.relative_to(ROOT))
+        relative = resolved.relative_to(ROOT).as_posix()
     except ValueError:
         parser.error(f"--prereg {prereg} must lie inside the repository")
     if resolved.parent != (ROOT / "preregistrations").resolve():
@@ -261,11 +261,14 @@ def train_and_evaluate_pair(job: tuple) -> list[dict]:
 
 
 def launch_arguments(args: argparse.Namespace) -> dict:
-    """The command-line arguments as recorded: paths inside the repository relative to it, so no machine's directories appear."""
+    """The command-line arguments as recorded: paths inside the repository relative to it, so no machine's directories appear.
+
+    Paths are written with forward slashes, so a report reads the same whichever platform wrote it.
+    """
     def recorded(value):
         if isinstance(value, Path):
             resolved = value.resolve()
-            return str(resolved.relative_to(ROOT)) if resolved.is_relative_to(ROOT) else f"<outside the repository>/{value.name}"
+            return resolved.relative_to(ROOT).as_posix() if resolved.is_relative_to(ROOT) else f"<outside the repository>/{value.name}"
         return value
 
     return {k: recorded(v) for k, v in vars(args).items()}
@@ -567,13 +570,16 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, b
 
 
 def write_checkpoints(out: Path, tier: str, report_name: str, run: dict) -> list[dict]:
-    """Write a run's checkpoints to out/checkpoints/<tier>/<report_name>/ and return what the report records about each."""
+    """Write a run's checkpoints to out/checkpoints/<tier>/<report_name>/ and return what the report records about each.
+
+    Each path is recorded relative to `out` with forward slashes, so reports from every platform read alike.
+    """
     written = []
     for decisions, blob in run.pop("checkpoints", []):
         relative = Path("checkpoints") / tier / report_name / f"{run['variant']}_sigma{run['sigma']}_seed{run['seed']}_q{decisions}.pt"
         (out / relative).parent.mkdir(parents=True, exist_ok=True)
         (out / relative).write_bytes(blob)
-        written.append({"path": str(relative), "decisions": decisions, "sha256": hashlib.sha256(blob).hexdigest(), "bytes": len(blob)})
+        written.append({"path": relative.as_posix(), "decisions": decisions, "sha256": hashlib.sha256(blob).hexdigest(), "bytes": len(blob)})
     return written
 
 

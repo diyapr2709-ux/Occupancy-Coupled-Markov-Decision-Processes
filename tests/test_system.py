@@ -527,6 +527,12 @@ def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
     assert calls == [("oc-sac", 0.2, 7), ("sac", 0.2, 7)] and [r["variant"] for r in runs] == ["oc-sac", "sac"]
 
 
+def test_recorded_arguments_use_forward_slashes_inside_the_repository():
+    script = _training_script()
+    recorded = script.launch_arguments(SimpleNamespace(out=ROOT / "runs" / "train", tier="dev"))
+    assert recorded == {"out": "runs/train", "tier": "dev"}
+
+
 def test_train_cli_rejects_overlapping_tiers(tmp_path):
     seeds_file = tmp_path / "seeds.yaml"
     seeds_file.write_text("dev: [0, 99]\nval: [50, 199]\ntest: [1000, 1099]\n", encoding="utf-8")
