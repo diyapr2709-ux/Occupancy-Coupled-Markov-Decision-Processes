@@ -100,16 +100,18 @@ Beside the harness:
 
 Compare policies with `expected_failure_rate`, the mean failure probability of the drugs actually given. It has the same expectation as the sampled `failure_rate`, without the patient-outcome noise.
 
-### Results on the toy environments (no learned reward)
+### Results on the toy environments (planners, heuristics and supervised imitation; no reinforcement learning)
 
-- **Without noise, the best schedule is a deterministic rotation.**
-  - The rotation search finds 13-quarter blocks with a 7-quarter first block.
-  - It reaches an expected failure rate of 0.3467 on both toy environments, the same as the oracle (regret 0.1 failures per 1,000-decision episode).
-  - For comparison: 4-quarter cycling 0.380, uniform mixing 0.389, fixed guideline 0.532.
+Unless a sentence names another report, every rate in this section is an expected failure rate per decision from `runs/vv/vv_20261025_201416_713126_29699.json`. A rate given without an interval is deterministic: it has zero spread over the five protocol seeds. That report records its seeds but not the code version. Its deterministic values reproduce to within 1e-16 in the two later two-seed reports (`runs/vv/vv_20261123_183549_650277_10740.json`, `runs/vv/vv_20261124_122758_669132_5799.json`); the 20-seed noise study and the five-seed imitation study have not been rerun at full size.
+
+- **Without noise, a deterministic rotation trails the replanning oracle by 0.10 expected failures per 1,000-decision episode.**
+  - The rotation search finds 13-quarter blocks with a 7-quarter first block. It reaches 0.3467 on both toy environments, against the oracle's 0.3466.
+  - The oracle optimises the schedule by gradient descent on the mean-field model from a few starts, always including the best rotation. The objective is non-convex, so neither is shown to be optimal.
+  - For comparison on TwoDrug: 4-quarter cycling 0.380, uniform mixing 0.389 (95% interval ±0.0002), fixed guideline 0.532. On PairedDrugs, 4-quarter cycling reaches 0.361; uniform mixing and the fixed guideline are unchanged.
   - Property 1 rules out deterministic *stationary* policies only.
-- **With noise, feedback is what matters.** The oracle re-plans every 4 quarters, starting each plan from the best rotation for the state it has reached. Over committing to the best rotation in advance, its paired gains on TwoDrug with 20 seeds are:
+- **(Exploratory: no file in `decisions/` fixes the 20-seed count in advance.) With noise, re-planning from the state reached improves on committing to the best rotation in advance.** The oracle re-plans every 4 quarters, starting each plan from the best rotation for the state it has reached. Its paired reductions on TwoDrug, over 20 seeds:
 
-  | Noise σ | Paired gain (95% interval) |
+  | Noise σ | Paired reduction in expected failure rate per decision (95% Student-t interval) |
   |---|---|
   | 0.1 | +0.008 [0.002, 0.014] |
   | 0.2 | +0.031 [0.018, 0.044] |
@@ -117,14 +119,17 @@ Compare policies with `expected_failure_rate`, the mean failure probability of t
 
   Source: `runs/vv/vv_20261025_201416_713126_29699.json` (`noise_robustness.replanning_gain`, 20 seeds).
 
-  Absolute rates at σ = 0.4 vary widely between seeds, so read the paired gains.
-- **Splitting mass inside a cross-resistance class changes nothing.**
-  - Within-class mixing has the same action entropy as cross-class mixing (0.856).
+  - For scale, the rotation's advantage over uniform mixing is 0.044, 0.045 and 0.060 at the three noise levels. These are differences of means with no interval, because the report stores no paired difference, so which effect is larger is not established.
+  - At σ = 0.4 the paired reductions spread widely (standard deviation 0.086 against a mean of 0.054), so the interval relies on the t-approximation.
+- **By construction, splitting mass inside a cross-resistance class changes nothing.** Drugs in one class have identical rows of `C`, and the dynamics depend on which drug is given only through its row of `C`. This is an implementation check, not a finding.
+  - Within-class mixing has the same action entropy as cross-class mixing (0.856 nats).
   - But it has the fixed guideline's pushforward entropy and failure rate.
-  - In the environment, the trajectories agree to 1e-16.
-- **Misspecifying `lam` costs little.** With a quarter of the true effective memory, the oracle reaches 0.355; with four times, 0.349; correct, 0.347.
-- **The policy head can represent the oracle.** Trained on held-out starting states, it captures 89–98% of the oracle's gain over uniform mixing on PairedDrugs. The rates are 0.344–0.348, against the oracle's 0.343 and uniform's 0.387.
-  - The 98% end comes from observing prescribing as selection pressure.
+  - In the verification check, policies that differ only within a class give resistance paths and failure rates that agree to within 1e-16 (PairedDrugs with rho = 0.3, one seed-0 episode per policy).
+- **Misspecifying `lam` (TwoDrug).** With a quarter of the true effective memory, the oracle reaches 0.355; with four times, 0.349; correct, 0.347. The quarter-memory loss is about a fifth of the oracle's gain over uniform mixing, about the size of the σ = 0.1 re-planning reduction.
+- **Supervised imitation of the oracle.** One policy head per variant, trained on the oracle's actions in the protocol-seed episodes and evaluated on five evaluation episodes with jittered starting states, captures 90–98% of the oracle's gain over uniform mixing on PairedDrugs.
+  - There is no interval on these gain shares: each variant is one training run, and the report keeps only per-variant aggregates.
+  - On these jittered starts the heads reach 0.344–0.348 (each ±0.006 to ±0.008: a 95% interval over five evaluation episodes, for one trained head per variant), the oracle 0.343 ± 0.007 and uniform 0.387 ± 0.005 over the same episodes. These rates are not comparable with the unjittered ones above.
+  - Which observation does better is not resolved. In this report the cloned head's point estimates favour prescribing observed as selection pressure (98% against 90%). Both later two-seed reports, which give identical values from heads trained on two seeds' episodes, favour drug observations (98% against 93%). Each figure is one training run.
   - These runs use the true `C` for the embeddings and the observation map, and the observation includes exact resistance.
 
 ### Trained agents
@@ -137,7 +142,7 @@ An earlier version of this section compared three entropy targets on validation 
 
 ## Seed protocol
 
-`ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)` is the harness protocol. The noise study uses 20 seeds, because its paired differences spread widely at σ = 0.4 (`runs/vv/vv_20261025_201416_713126_29699.json`).
+`ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)` is the harness protocol. The noise study uses 20 seeds. No file in `decisions/` fixes that count before the run, so the noise study is exploratory.
 - **Tiers.** `seeds.yaml` splits training seeds into three disjoint ranges: dev for exploration, val for choosing hyperparameters, test for the single confirmatory run of a preregistration. `experiments/train_agent.py --tier` rejects seeds outside the tier.
 - **Evaluation episodes follow the tier.** A run is evaluated on episodes `10 000 + first seed of the tier + e`, so val and test episodes are never seen by a dev run. A test-tier run also needs a committed preregistration in `preregistrations/` that names its platform, the owner's approval file, a clean tree, and no earlier test launch of the same preregistration; the scripts refuse it otherwise. They do not stop a different preregistration from reusing test seeds.
 - **Run reports.** Training and phase reports written by the current scripts record the tier, seeds, evaluation episodes, git state, platform label and instance, and training reports also record each agent's reachable entropy range and temperature. Older training reports lack some of these fields, and none records a platform label. The validation reports under `runs/vv/` record their seeds, but not the tier, git state or evaluation episodes.
