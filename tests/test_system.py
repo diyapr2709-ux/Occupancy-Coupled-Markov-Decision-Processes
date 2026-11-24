@@ -519,6 +519,28 @@ def test_test_tier_checks_refuse_in_order_and_cannot_borrow_an_approval(tmp_path
     assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
 
 
+def test_prereg_digest_hashes_the_committed_blob_whatever_the_checkout_did_to_line_endings(tmp_path, monkeypatch):
+    script = _training_script()
+    repo = tmp_path / "repo"
+    (repo / "preregistrations").mkdir(parents=True)
+    committed = b"slug: planned\nplatform: test-host\n"
+    (repo / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    (repo / "preregistrations" / "planned.yaml").write_bytes(committed)
+    for args in (["init", "-q"], ["add", "."], ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "fixture"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setattr(script, "ROOT", repo)
+    planned = repo / "preregistrations" / "planned.yaml"
+    planned.write_bytes(committed.replace(b"\n", b"\r\n"))  # what a CRLF checkout leaves on disk; git sees no change
+    assert script.prereg_digest(planned) == hashlib.sha256(committed).hexdigest()
+    edited = b"slug: planned, edited after the commit\n"
+    planned.write_bytes(edited)
+    assert script.prereg_digest(planned) == hashlib.sha256(edited).hexdigest()  # modified: the bytes on disk
+    draft = repo / "preregistrations" / "draft.yaml"
+    draft.write_bytes(b"slug: draft\r\n")
+    assert script.prereg_digest(draft) == hashlib.sha256(b"slug: draft\r\n").hexdigest()  # untracked: the bytes on disk
+    assert script.prereg_digest(None) is None
+
+
 def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
     script = _training_script()
     args = SimpleNamespace(quarters=200, episodes=2, diagnose_gap=False, checkpoint_every=None, sigmas=[0.0, 0.2], seeds=[0, 1])

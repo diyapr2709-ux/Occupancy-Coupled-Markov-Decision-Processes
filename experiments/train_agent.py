@@ -275,8 +275,23 @@ def launch_arguments(args: argparse.Namespace) -> dict:
 
 
 def prereg_digest(prereg: Path | None) -> str | None:
-    """SHA-256 of the preregistration, read at launch so the record names the file as it stood when the run began."""
-    return hashlib.sha256(prereg.read_bytes()).hexdigest() if prereg else None
+    """SHA-256 of the preregistration, read at launch so the record names the file as it stood when the run began.
+
+    A preregistration committed and unchanged against HEAD is hashed from its committed blob, so
+    the digest depends on the commit alone and not on how the checkout converted line endings.
+    Any other file (uncommitted, modified, or outside the repository) is hashed from its bytes on disk.
+    """
+    if prereg is None:
+        return None
+    resolved = prereg.resolve()
+    if resolved.is_relative_to(ROOT):
+        relative = resolved.relative_to(ROOT).as_posix()
+        tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "--", relative], cwd=ROOT, capture_output=True).returncode == 0
+        unchanged = tracked and subprocess.run(["git", "diff", "--quiet", "HEAD", "--", relative], cwd=ROOT, capture_output=True).returncode == 0
+        if unchanged:
+            blob = subprocess.run(["git", "cat-file", "blob", f"HEAD:{relative}"], cwd=ROOT, capture_output=True, check=True).stdout
+            return hashlib.sha256(blob).hexdigest()
+    return hashlib.sha256(resolved.read_bytes()).hexdigest()
 
 
 def record_launch(out: Path, launch_id: str, args: dict, git: dict, backend: str, prereg_slug: str | None, prereg_sha256: str | None) -> None:
