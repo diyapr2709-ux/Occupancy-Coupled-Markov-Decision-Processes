@@ -217,7 +217,7 @@ def main() -> int:
         "cells": [{"delay": d, "lam": lam, "sigma": s, **summarise_cell(by_cell[(d, lam, s)])} for d, lam, s in cells],
     }
     path = args.out / f"{launch_id}.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
 
     print(f"Class sizes {list(sizes)}, horizon {args.horizon}: {len(cells)} cells, {args.episodes} {args.tier}-tier episodes each")
     print(f"  {'delay':>5} {'lam':>5} {'sigma':>5}   " + "   ".join(f"{name} (95% interval)" for name in CONTRASTS))

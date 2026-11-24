@@ -163,7 +163,7 @@ def main() -> int:
         "predictions": predictions,
     }
     path = args.out / f"predict_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
     print(f"Class sizes {list(sizes)}: predicted expected failure rate of each soft-optimal schedule")
     for p in predictions:
         a = p["alphas"]

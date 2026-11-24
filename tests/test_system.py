@@ -556,7 +556,9 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     first.write_bytes(intact[:-1] + b"x")
     assert verify_checkpoints.verify(path) == [f"size or SHA-256 differs from the report: {report['runs'][0]['checkpoints'][0]['path']}"]
     first.write_bytes(intact)
-    launch = json.loads((tmp_path / "launches" / f"{path.stem}.json").read_text(encoding="utf-8"))
+    launch_path = tmp_path / "launches" / f"{path.stem}.json"
+    assert b"\r" not in path.read_bytes() and b"\r" not in launch_path.read_bytes()  # the same bytes on every platform
+    launch = json.loads(launch_path.read_text(encoding="utf-8"))
     assert launch["launch_id"] == path.stem and launch["tier"] == "val" and launch["platform"] == "test-host"
     assert launch["git"] == report["git"] and launch["prereg_slug"] is None and launch["prereg_sha256"] is None
     oc_sac, sac = (next(r for r in report["runs"] if r["variant"] == v) for v in ("oc-sac", "sac"))

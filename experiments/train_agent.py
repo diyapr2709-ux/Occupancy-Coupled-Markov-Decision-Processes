@@ -282,7 +282,7 @@ def record_launch(out: Path, launch_id: str, args: dict, git: dict, backend: str
     folder.mkdir(parents=True, exist_ok=True)
     record = {"launch_id": launch_id, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tier": args["tier"], "platform": args["platform"],
               "backend": backend, "prereg_slug": prereg_slug, "prereg_sha256": prereg_sha256, "git": git, "args": args}  # fmt: skip
-    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8", newline="\n")
 
 
 def _rollouts(env, policy, episodes: int, first_episode: int) -> list:
@@ -835,7 +835,7 @@ def main() -> int:
         "baselines": {str(s): baselines[s] for s in args.sigmas},  # per-episode values, so every contrast can be recomputed
     }
     report["summary"] = {str(s): summarise(runs, baselines[s], s, args.equivalence_margin) for s in args.sigmas}
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
 
     for sigma in args.sigmas:
         summary = report["summary"][str(sigma)]

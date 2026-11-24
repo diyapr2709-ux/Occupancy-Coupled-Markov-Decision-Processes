@@ -153,9 +153,9 @@ def main() -> int:
     svg, rows = draw(report, args.contrast, predictions)
     args.out.mkdir(parents=True, exist_ok=True)
     stem = f"{args.report.stem}_{args.contrast}"
-    (args.out / f"{stem}.svg").write_text(svg, encoding="utf-8")
+    (args.out / f"{stem}.svg").write_text(svg, encoding="utf-8", newline="\n")
     with open(args.out / f"{stem}.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["delay", "lam", "sigma", "mean", "ci95", "predicted"])
+        writer = csv.DictWriter(f, fieldnames=["delay", "lam", "sigma", "mean", "ci95", "predicted"], lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     print(f"Wrote {args.out / stem}.svg and .csv")
