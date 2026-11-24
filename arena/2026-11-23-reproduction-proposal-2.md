@@ -113,10 +113,10 @@ A further caveat for rung 2: all 15 drugs act against one TEM beta-lactamase. Ta
 These are cited from memory, not opened in this session.
 
 **Files:**
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-reproduction-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/seeds.yaml
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/budget.yaml
+- arena/2026-11-23-reproduction-criteria.md
+- inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
+- seeds.yaml
+- budget.yaml
 
 Nothing was written or executed.
 

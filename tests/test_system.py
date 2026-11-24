@@ -2,9 +2,11 @@
 
 import copy
 import csv
+import hashlib
 import json
 import math
 import pickle
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -345,6 +347,9 @@ def test_quarterly_and_discounted_failure_follow_the_drugs_given():
         (["--tier", "dev", "--episodes", "101"], "--episodes"),
         (["--tier", "test", "--seeds", "1000"], "--prereg"),
         (["--tier", "test", "--seeds", "1000", "--prereg", "preregistrations/missing.yaml"], "--prereg"),
+        (["--tier", "val", "--seeds", "100"], "--platform"),
+        (["--tier", "dev", "--checkpoint-every", "6000"], "--checkpoint-every"),
+        (["--tier", "val", "--seeds", "100", "--platform", "x", "--checkpoint-every", "1000"], "--checkpoint-every"),
         (["--tier", "dev", "--class-sizes", "4"], "--class-sizes"),
         (["--tier", "dev", "--class-sizes", "3", "0"], "--class-sizes"),
         (["--tier", "dev", "--lam", "1.0"], "--lam"),
@@ -357,6 +362,171 @@ def test_train_cli_rejects_runs_outside_the_seed_protocol(args, message, tmp_pat
     assert not list(tmp_path.iterdir())
 
 
+def test_train_cli_refuses_a_preregistration_outside_the_repository(tmp_path):
+    prereg = tmp_path / "outside.yaml"
+    prereg.write_text("slug: outside\n")
+    result = _train_cli("--tier", "test", "--seeds", "1000", "--prereg", str(prereg), "--out", str(tmp_path / "out"))
+    assert result.returncode == 2 and "inside the repository" in result.stderr
+    assert not (tmp_path / "out" / "launches").exists()
+
+
+def _protocol():
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import check_dev_protocol
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    return check_dev_protocol
+
+
+def _step1_report(sizes, quarters, rates, same_weights=True, learned=10):
+    """A fixed-temperature-0 report whose agents fail at `rates[seed]` on two episodes; uniform 0.40, replanner 0.30."""
+    runs = []
+    for seed, rate in enumerate(rates):
+        for variant in ("oc-sac", "sac"):
+            final = f"final-{seed}-{quarters}" + ("" if same_weights or variant == "oc-sac" else "-other")
+            runs.append({"variant": variant, "sigma": 0.0, "seed": seed, "expected_failure_rate": [rate, rate],
+                         "parameter_sha256": {"initial": f"init-{seed}", "after_first_window": f"first-{seed}", "final": final}})  # fmt: skip
+    config = {"temperature": "fixed", "alpha": 0.0, "total_quarters": quarters}
+    return {"_path": f"train_{quarters}.json", "class_structure": {"class_sizes": list(sizes)}, "runs": runs,
+            "sac_config": {"oc-sac": config, "sac": config},
+            "baselines": {"0.0": {"uniform": {"expected_failure_rate": [0.40, 0.40]}, "oracle[replans every quarter]": {"expected_failure_rate": [0.30, 0.30]}}},
+            "summary": {"0.0": {"oc-sac": {"runs_learned": learned}}}}  # fmt: skip
+
+
+def test_step1_picks_the_first_converged_length_and_fails_without_one():
+    protocol = _protocol()
+    noise = [0.001 * ((s % 3) - 1) for s in range(10)]
+    flat = {q: [0.32 + n for n in noise] for q in (12_000, 24_000, 48_000)}
+    reports = [_step1_report(sizes, q, flat[q]) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in flat]
+    lines, result = protocol.step1(reports)
+    assert result == {"failed": False, "bitwise": True, "length": 12_000}, lines
+    improving = {12_000: [0.36 + n for n in noise], 24_000: [0.32 + n for n in noise], 48_000: [0.32 + n for n in noise]}
+    reports = [_step1_report(sizes, q, improving[q]) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in improving]
+    assert protocol.step1(reports)[1]["length"] == 24_000  # 12k -> 24k still gains 0.4 of the replanner's share
+    still = {12_000: [0.38 + n for n in noise], 24_000: [0.35 + n for n in noise], 48_000: [0.32 + n for n in noise]}
+    reports = [_step1_report(sizes, q, still[q]) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in still]
+    lines, result = protocol.step1(reports)
+    assert result["failed"] and result["length"] is None and "STOP" in lines[-1]
+    reports = [_step1_report((2, 2), q, flat[q], same_weights=q != 24_000) for q in flat]
+    lines, result = protocol.step1(reports)
+    assert result["failed"] and not result["bitwise"] and "FAIL" in lines[0]
+
+
+def _step2_report(alpha_path, alpha_eval, entropy_last, fixed=None):
+    rng = {"floor": 0.0, "maximum": math.log(2), "target": 0.89 * math.log(2)}
+    cfg = {"temperature": "fixed" if fixed is not None else "auto", "alpha": fixed or 0.0, "log_alpha_range": [-12.0, 2.0], "total_quarters": 12_000}
+    runs = [{"variant": v, "sigma": 0.0, "seed": 0, "alpha_path": alpha_path, "alpha_at_evaluation": alpha_eval, "entropy_path": [entropy_last],
+             "entropy_range": rng, "policy_entropy": {"action": 0.05 + math.log(2), "within_class": math.log(2)}} for v in ("oc-sac", "sac")]  # fmt: skip
+    for run in runs:
+        if run["variant"] == "sac":
+            run["policy_entropy"] = {"action": 0.05, "within_class": 0.0}
+    return {"_path": "train_dev.json", "class_structure": {"class_sizes": [2, 2]}, "runs": runs, "sac_config": {"oc-sac": cfg, "sac": cfg}}
+
+
+def test_step2_holds_learned_temperatures_to_their_clamp_target_and_settling():
+    protocol = _protocol()
+    target = 0.89 * math.log(2)
+    settled = protocol.step2([_step2_report([0.2, 0.15, 0.12, 0.11], 0.11, target)])[1]
+    assert settled == {"failed": False, "widen_upward": False}
+    assert protocol.step2([_step2_report([0.2, 0.15, 0.12, math.exp(-12.0)], 0.11, target)])[1]["failed"]  # reached the clamp
+    assert protocol.step2([_step2_report([0.2, 0.15, 0.12, 0.11], 0.11, 0.3)])[1]["failed"]  # far from its target
+    assert protocol.step2([_step2_report([0.2, 0.15, 0.12, 0.11, 0.11, 0.11, 2.0, 0.11], 0.11, target)])[1]["failed"]  # swinging in the last quarter
+    assert not protocol.step2([_step2_report([0.1] * 4, 0.1, 0.0, fixed=0.1)])[1]["failed"]
+    assert protocol.step2([_step2_report([0.1, 0.1, 0.2, 0.1], 0.1, 0.0, fixed=0.1)])[1]["failed"]
+    assert protocol.step2([_step2_report([3.0] * 4, 3.0, 0.0, fixed=3.0)])[1]["widen_upward"]  # class entropy 0.05 < 0.9 log 2
+
+
+REPORTS_WITH_A_HOME_PATH = {  # committed before paths were recorded relative to the repository; runs/ is never edited
+    "runs/phase/phase_20261123_184302_13496.json": "d89bc092d7eeed6b3519904eec858530d3d8d4e27158182a61b980fe9e44c345",
+    "runs/phase/phase_20261123_190013_15752.json": "b1bda038b5aaa3bd780265e10f36f3e4836e1cbc8e4c2822048f6785207891fd",
+    "runs/train/train_20261116_190634_8365.json": "2549945dff723963c918f747ddbb68c7d8bf6677ee2a610b28b418907a3c1dca",
+    "runs/train/train_20261116_192212_10213.json": "a7c6272ae21875216a9fb184ba7e2cd036481594d988701b3429a23fca5bca31",
+    "runs/train/train_20261116_233400_32604.json": "074d75abfc79551ce3de497fcc28b5dbdf2e258d7f1f99abd8fe59c41b004290",
+    "runs/train/train_20261123_184321_12020.json": "cc2b74fe66fc5ac0a6828e410612fc50502b5833c8f0746e75f0a9c44bda8263",
+    "runs/train/train_20261123_184953_15052.json": "412c81f0b2d59775aca56433be30a7ff47d2c2a2de619ecbd1758d3ff36cc314",
+    "runs/train/train_20261123_190717_20498.json": "2ea2673aaa33e3220465407fca3e833a46ff913d52808851c3fc62ec86d93785",
+    "runs/train/train_20261123_190750_20538.json": "bacadf036cf15d0f635b46a6e293716feac200cfa4959205ccb7c6a5f545fa89",
+    "runs/train/train_20261123_194806_29133.json": "3e658011cf5c6e6bfea147afe0eeeea3601c8875a0fbc1bf6104e5862b1d5a06",
+}
+
+
+def test_no_file_carries_a_home_directory_path_beyond_the_known_reports():
+    # a home directory names its owner; both the path form and the dashed form a tool may record are caught
+    import re
+
+    pattern = re.compile(r"(/Users/|/home/)[A-Za-z0-9._-]+/|-Users-[A-Za-z0-9._]+-")
+    listed = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=ROOT, capture_output=True, text=True, check=True)
+    offending = []
+    for name in listed.stdout.split():
+        path = ROOT / name
+        if path.suffix == ".pt" or not path.is_file():
+            continue
+        if pattern.search(path.read_text(errors="ignore")) and REPORTS_WITH_A_HOME_PATH.get(name) != hashlib.sha256(path.read_bytes()).hexdigest():
+            offending.append(name)
+    assert offending == []
+
+
+def test_a_seed_file_cannot_relabel_the_test_seeds(tmp_path):
+    relabelled = tmp_path / "seeds.yaml"
+    relabelled.write_text("dev: [1000, 1099]\nval: [100, 199]\ntest: [2000, 2099]\n")
+    result = _train_cli("--tier", "dev", "--seeds", "1000", "--seeds-file", str(relabelled), "--out", str(tmp_path / "out"))
+    assert result.returncode == 2 and "overlaps the repository's test seeds" in result.stderr
+    result = _train_cli("--tier", "test", "--seeds", "2000", "--seeds-file", str(relabelled), "--out", str(tmp_path / "out"))
+    assert result.returncode == 2 and "the repository's seeds.yaml" in result.stderr
+    assert not list((tmp_path / "out").iterdir())  # refused before any launch record or report
+
+
+def _refusal(capsys, check, *args) -> str:
+    import argparse
+
+    with pytest.raises(SystemExit):
+        check(argparse.ArgumentParser(), *args)
+    return capsys.readouterr().err
+
+
+def test_test_tier_checks_refuse_in_order_and_cannot_borrow_an_approval(tmp_path, capsys, monkeypatch):
+    script = _training_script()
+    repo = tmp_path / "repo"
+    (repo / "preregistrations").mkdir(parents=True)
+    (repo / "preregistrations" / "planned.yaml").write_text("slug: planned\nplatform: test-host\n")
+    (repo / "preregistrations" / "unplaced.yaml").write_text("slug: unplaced\n")
+    (repo / "notes.yaml").write_text("not a preregistration\n")
+    for args in (["init", "-q"], ["add", "."], ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "fixture"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setattr(script, "ROOT", repo)
+    planned, out = repo / "preregistrations" / "planned.yaml", tmp_path / "out"
+    clean, dirty = {"dirty": False}, {"dirty": True}
+    assert "file in preregistrations/" in _refusal(capsys, script.check_test_launch, repo / "notes.yaml", clean, out, "test-host")
+    assert "clean, committed tree" in _refusal(capsys, script.check_test_launch, planned, dirty, out, "test-host")
+    assert "must name the platform" in _refusal(capsys, script.check_test_launch, repo / "preregistrations" / "unplaced.yaml", clean, out, "test-host")
+    assert "preregistered for platform test-host, not rtx-1" in _refusal(capsys, script.check_test_launch, planned, clean, out, "rtx-1")
+    assert "approvals/planned.ok" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
+    (out / "launches").mkdir(parents=True)
+    (out / "launches" / "train_earlier.json").write_text(json.dumps({"launch_id": "train_earlier", "tier": "test", "prereg_slug": "planned"}))
+    assert script.earlier_test_launches("planned", out) == ["train_earlier"]
+    assert "already used by launch train_earlier" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
+    link = repo / "preregistrations" / "approved.yaml"
+    link.symlink_to(planned)
+    assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
+    planned.write_text("slug: planned, edited after the commit\n")
+    assert "committed, unmodified" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
+
+
+def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
+    script = _training_script()
+    args = SimpleNamespace(quarters=200, episodes=2, diagnose_gap=False, checkpoint_every=None, sigmas=[0.0, 0.2], seeds=[0, 1])
+    assert [(job[0], job[1]) for job in script.training_jobs(args, {}, 0, ((2, 2), None, None))] == [(s, seed) for s in (0.0, 0.2) for seed in (0, 1)]
+    calls = []
+    original = script.train_and_evaluate
+    script.train_and_evaluate = lambda job: calls.append(job[:3]) or {"variant": job[0]}
+    try:
+        runs = script.train_and_evaluate_pair((0.2, 7, 200, 2, {}, 0, ((2, 2), None, None), False, None))
+    finally:
+        script.train_and_evaluate = original
+    assert calls == [("oc-sac", 0.2, 7), ("sac", 0.2, 7)] and [r["variant"] for r in runs] == ["oc-sac", "sac"]
+
+
 def test_train_cli_rejects_overlapping_tiers(tmp_path):
     seeds_file = tmp_path / "seeds.yaml"
     seeds_file.write_text("dev: [0, 99]\nval: [50, 199]\ntest: [1000, 1099]\n")
@@ -367,22 +537,60 @@ def test_train_cli_rejects_overlapping_tiers(tmp_path):
 def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     small = ["--sigmas", "0.0", "--quarters", "200", "--episodes", "2", "--workers", "2",
              "--set", "learning_starts=64", "batch_size=32", "hidden_dim=16", "dual_update_every=40"]  # fmt: skip
-    result = _train_cli("--tier", "val", "--seeds", "100", *small, "--out", str(tmp_path))
+    result = _train_cli("--tier", "val", "--seeds", "100", "--platform", "test-host", *small, "--out", str(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (path,) = tmp_path.glob("train_*.json")
     report = json.loads(path.read_text())
     assert report["args"]["tier"] == "val" and report["args"]["seeds"] == [100]
+    assert report["report_schema"] == 2 and report["launch_id"] == path.stem and report["platform"] == "test-host"
+    assert report["args"]["seeds_file"] == "seeds.yaml" and platform.node() not in path.read_text()  # no machine's names or directories
+    assert report["args"]["out"] == f"<outside the repository>/{tmp_path.name}"
+    sys.path.insert(0, str(ROOT / "experiments"))
+    try:
+        import verify_checkpoints
+    finally:
+        sys.path.remove(str(ROOT / "experiments"))
+    assert verify_checkpoints.verify(path, load=True) == []
+    first = tmp_path / report["runs"][0]["checkpoints"][0]["path"]
+    intact = first.read_bytes()
+    first.write_bytes(intact[:-1] + b"x")
+    assert verify_checkpoints.verify(path) == [f"size or SHA-256 differs from the report: {report['runs'][0]['checkpoints'][0]['path']}"]
+    first.write_bytes(intact)
+    launch = json.loads((tmp_path / "launches" / f"{path.stem}.json").read_text())
+    assert launch["launch_id"] == path.stem and launch["tier"] == "val" and launch["platform"] == "test-host"
+    assert launch["git"] == report["git"] and launch["prereg_slug"] is None and launch["prereg_sha256"] is None
+    oc_sac, sac = (next(r for r in report["runs"] if r["variant"] == v) for v in ("oc-sac", "sac"))
+    assert oc_sac["parameter_sha256"]["initial"] == sac["parameter_sha256"]["initial"]  # one seed, identical initial weights
+    assert [r["variant"] for r in report["runs"]] == ["oc-sac", "sac"]
     assert report["evaluation_episode_seeds"] == [10_100, 10_101]
     assert set(report["git"]) == {"commit", "dirty", "code_diff_sha256", "untracked_code"}
     assert report["sac_config"]["oc-sac"]["entropy"] == "pushforward" and report["sac_config"]["sac"]["entropy"] == "action"
     assert set(report["baselines"]["0.0"]) >= {"uniform", "oracle", "oracle[replans every quarter]", "oracle[one drug per quarter]"}
     assert report["backend"]["name"] == "local" and report["backend"]["workers"] == 2
     assert report["instance"]["markov_observation"] is True and "resistance_noise" not in report["instance"]
-    targets = report["entropy_target_nats"]
-    assert targets["oc-sac"] == pytest.approx([0.05 * math.log(2)] * 2) and targets["sac"] == pytest.approx([0.05 * math.log(4)] * 2)
     assert {r["variant"] for r in report["runs"]} == {"oc-sac", "sac"}
     assert report["class_structure"] == {"class_sizes": [2, 2], "imbalance_kl_nats": pytest.approx(0.0, abs=1e-12)}
     assert report["instance"]["cross_resistance"] == [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+    # every agent is saved next to the report, and the saved agent is the one that was evaluated
+    from ocmdp.agents.oc_sac import QuarterlyChoicePolicy, SACConfig, load_checkpoint, parameter_sha256
+
+    script = _training_script()
+    for run in report["runs"]:
+        (checkpoint,) = run["checkpoints"]
+        blob = (tmp_path / checkpoint["path"]).read_bytes()
+        assert checkpoint["path"] == f"checkpoints/val/{path.stem}/{run['variant']}_sigma0.0_seed100_q200.pt"
+        assert checkpoint["decisions"] == 200 and checkpoint["bytes"] == len(blob)
+        assert checkpoint["sha256"] == hashlib.sha256(blob).hexdigest()
+        agent, decisions = load_checkpoint(blob)
+        config = {k: tuple(v) if isinstance(v, list) else v for k, v in report["sac_config"][run["variant"]].items()}
+        assert decisions == 200 and agent.cfg == SACConfig(**config)
+        assert parameter_sha256(agent) == run["parameter_sha256"]["final"]
+        assert run["entropy_range"] == pytest.approx({"floor": agent.entropy_floor, "maximum": agent.entropy_max, "target": agent.entropy_target})
+        env = script.make_env(0.0)
+        greedy = QuarterlyChoicePolicy(lambda obs, rng: agent.choose(obs, rng, greedy=True), env.action_space.n, run["variant"])
+        again = script._episode_stats(env, script._rollouts(env, greedy, 2, 100), agent.cfg.gamma)
+        assert again["expected_failure_rate"] == run["argmax"]["expected_failure_rate"]
 
 
 def test_modal_backend_pins_the_local_package_versions_and_ships_the_code_it_runs():
@@ -404,21 +612,25 @@ def test_modal_backend_pins_the_local_package_versions_and_ships_the_code_it_run
 def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them(tmp_path):
     small = ["--sigmas", "0.0", "--quarters", "200", "--episodes", "2", "--workers", "2",
              "--set", "learning_starts=64", "batch_size=32", "hidden_dim=16", "dual_update_every=40"]  # fmt: skip
-    result = _train_cli("--tier", "dev", "--seeds", "0", "--class-sizes", "3", "1", *small, "--out", str(tmp_path))
+    result = _train_cli("--tier", "val", "--seeds", "100", "--platform", "test-host", "--class-sizes", "3", "1", "--checkpoint-every", "100", *small, "--out", str(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (path,) = tmp_path.glob("train_*.json")
     report = json.loads(path.read_text())
     assert report["instance"]["cross_resistance"] == [[1.0, 0.0]] * 3 + [[0.0, 1.0]]
     kl = math.log(2) + 0.75 * math.log(0.75) + 0.25 * math.log(0.25)
     assert report["class_structure"] == {"class_sizes": [3, 1], "imbalance_kl_nats": pytest.approx(kl)}
-    targets = report["entropy_target_nats"]
-    assert targets["oc-sac"] == pytest.approx([0.05 * math.log(2)] * 2) and targets["sac"] == pytest.approx([0.05 * math.log(4)] * 2)
+    ranges = {r["variant"]: r["entropy_range"] for r in report["runs"]}
+    # three tied drugs and a singleton: drug entropy can reach 0 here, class entropy reaches at most log 2
+    assert ranges["sac"]["floor"] == pytest.approx(0.0, abs=1e-6) and ranges["sac"]["maximum"] == pytest.approx(math.log(4), abs=1e-4)
+    assert ranges["oc-sac"]["floor"] == pytest.approx(0.0, abs=1e-6) and ranges["oc-sac"]["maximum"] == pytest.approx(math.log(2), abs=1e-4)
     for run in report["runs"]:
+        assert [c["decisions"] for c in run["checkpoints"]] == [100, 200]
         spent = run["policy_entropy"]
-        assert 0.0 <= spent["within_class"] <= min(spent["action"], 0.75 * math.log(3)) + 1e-6
+        # tied drugs: the entropy inside classes is q_big log 3, at most log 3 whatever mass the big class gets
+        assert 0.0 <= spent["within_class"] <= min(spent["action"], math.log(3)) + 1e-6
     summary = report["summary"]["0.0"]
     paired = summary["paired comparison"]
-    assert paired["seeds"] == [0] and paired["seeds_where_oc_sac_fails_less"] in (0, 1)
+    assert paired["seeds"] == [100] and paired["seeds_where_oc_sac_fails_less"] in (0, 1)
     assert 0.0 <= paired["probability_oc_sac_fails_less"] <= 1.0
     lo, hi = paired["two_level_bootstrap_ci95_of_mean_difference"]
     assert lo <= summary["oc-sac minus sac (paired by seed)"]["mean"] <= hi
@@ -437,9 +649,13 @@ def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them
     for run in report["runs"]:
         assert len(run["discounted_failure_rate"]) == len(run["expected_failure_rate"]) == 2 == len(run["final_fail_prob"])
         assert run["critic"]["states"] == 2 * 40 and run["critic"]["actor_choice_regret"] >= -1e-9
-        assert len(run["alpha_path"]) == len(run["xi_path"]) == (200 - 64 + 1) // 40  # one per window of dual_update_every updates
-        assert set(run["alpha_at_evaluation"]) == {"q10", "q50", "q90"}
-        assert set(run["host"]) == {"machine", "cpu", "simd"}
+        assert len(run["alpha_path"]) == len(run["xi_path"]) == len(run["entropy_path"]) == (200 - 64 + 1) // 40  # one per window
+        assert all(run["entropy_range"]["floor"] - 1e-6 <= h <= run["entropy_range"]["maximum"] + 1e-6 for h in run["entropy_path"])
+        assert math.exp(-12.0) * (1 - 1e-6) <= run["alpha_at_evaluation"] <= math.exp(2.0) * (1 + 1e-6)
+        assert set(run["host"]) == {"machine", "cpu", "simd", "numpy_cpu_features", "torch_threads", "cuda_visible_devices",
+                                    "cuda_available", "pid", "job_in_process", "modal"}  # fmt: skip
+        assert run["host"]["torch_threads"] == 1 and run["host"]["job_in_process"] >= 1 and run["host"]["numpy_cpu_features"]
+        assert set(run["parameter_sha256"]) == {"initial", "after_first_window", "final"}
 
 
 def _phase_cli(*args, timeout=300):
@@ -466,11 +682,12 @@ def test_phase_cli_rejects_invalid_grids(args, message, tmp_path):
 def test_phase_cli_pairs_every_policy_on_the_tiers_episodes_and_its_contrasts_recompute(tmp_path):
     grid = ["--delays", "0", "2", "--lams", "0.5", "--sigmas", "0.0", "0.3", "--horizon", "6", "--episodes", "2", "--workers", "4",
             "--kappa", "0.2", "--delta", "0.1"]  # fmt: skip
-    result = _phase_cli("--tier", "val", *grid, "--out", str(tmp_path))
+    result = _phase_cli("--tier", "val", "--platform", "test-host", *grid, "--out", str(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (path,) = tmp_path.glob("phase_*.json")
     report = json.loads(path.read_text())
     assert report["evaluation_episode_seeds"] == [10_100, 10_101] and report["backend"]["name"] == "local"
+    assert report["launch_id"] == path.stem and (tmp_path / "launches" / f"{path.stem}.json").is_file()
     assert report["instance"]["horizon_quarters"] == 6 and report["instance"]["cross_resistance"] == [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
     assert (report["instance"]["kappa"], report["instance"]["delta"]) == (0.2, 0.1)
     assert len(report["cells"]) == 4 and len(report["results"]) == 4 * len(report["policies"])
@@ -531,6 +748,14 @@ def _stats():
 )
 def test_t_quantile_matches_tables(probability, df, quantile):
     assert _stats().t_quantile(probability, df) == pytest.approx(quantile, abs=2e-6)
+
+
+def test_t_quantile_reaches_heavy_tails_and_refuses_lower_probabilities():
+    stats = _stats()
+    assert stats.t_quantile(0.9999, 1) == pytest.approx(math.tan(math.pi * (0.9999 - 0.5)), rel=1e-6)  # Cauchy: about 3183
+    for probability in (0.4, 0.5, 1.0):
+        with pytest.raises(ValueError):
+            stats.t_quantile(probability, 5)
 
 
 def test_equivalence_needs_the_whole_90_percent_interval_inside_the_margin():
@@ -607,7 +832,7 @@ def _scorer():
     return score_phase_predictions
 
 
-@pytest.mark.parametrize("predicted, expected_error, verdict", [(0.2, 0.0, "pass"), (0.05, math.log(4), "fail")])
+@pytest.mark.parametrize("predicted, expected_error, verdict", [(0.2, 0.0, "pass"), (0.05, math.log(2), "fail")])  # 0.05 is censored to 0.1
 def test_scorer_measures_the_crossing_and_rules_against_the_margin(predicted, expected_error, verdict):
     scorer = _scorer()
     lines, episodes = scorer.measured_lines([_synthetic_phase_report(0.1, 0.2)], "planned_once_minus_greedy")
@@ -625,6 +850,28 @@ def test_scorer_censors_crossings_outside_the_grid_by_the_contrasts_orientation(
     assert scorer.line_error(sigmas, (None, 1), (None, -1), beyond=1) == pytest.approx(math.log(0.4 / 0.1))
     assert scorer.line_error(sigmas, (0.2, 1), (None, -1), beyond=1) == pytest.approx(math.log(0.4 / 0.2))
     assert scorer.line_error(sigmas, (None, 1), (0.2, 1), beyond=1) == pytest.approx(math.log(0.2 / 0.1))
+    # crossings the grid cannot resolve are clamped, measured and predicted alike
+    assert scorer.line_error(sigmas, (None, 1), (0.05, 1), beyond=1) == 0.0
+    assert scorer.line_error(sigmas, (0.025, 1), (None, 1), beyond=1) == 0.0
+    assert scorer.line_error(sigmas, (None, -1), (0.9, 1), beyond=1) == 0.0
+
+
+def test_crossing_is_where_the_contrast_settles_into_its_sign():
+    scorer = _scorer()
+    sigmas = np.array([0.0, 0.1, 0.2, 0.3, 0.4])
+    assert scorer.crossing(sigmas, np.array([0.1, -0.1, -0.1, 0.1, 0.2]), 1) == (pytest.approx(0.25), 1)  # not the first dip at 0.05
+    assert scorer.crossing(sigmas, np.array([0.1, 0.2, 0.1, 0.3, 0.2]), 1) == (None, 1)
+    assert scorer.crossing(sigmas, np.array([0.1, -0.2, 0.1, -0.3, -0.2]), 1) == (None, -1)
+    assert scorer.crossing(sigmas, np.zeros(5), 1) == (None, 0)
+    assert scorer.line_error(sigmas, scorer.crossing(sigmas, np.zeros(5), 1), (None, -1), beyond=1) == 0.0  # never shows the sign: above
+
+
+def test_scorer_refuses_reports_evaluated_on_different_episodes():
+    scorer = _scorer()
+    a, b = _synthetic_phase_report(0.1, 0.2), _synthetic_phase_report(0.05, 0.2)
+    a["evaluation_episode_seeds"], b["evaluation_episode_seeds"] = [10_000, 10_001], [30_000, 30_001]
+    with pytest.raises(ValueError, match="same evaluation episodes"):
+        scorer.measured_lines([a, b], "planned_once_minus_greedy")
 
 
 def test_scorer_flags_a_shift_in_the_wrong_direction_and_compares_with_a_null():
@@ -700,8 +947,8 @@ def test_continuation_value_matches_a_step_by_step_recomputation():
         rewards.append(cfg.reward_scale * np.mean(quarter_rewards))
         if not done:
             with torch.no_grad():
-                probs, log_alpha = agent.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
-                bonuses.append(float(log_alpha.clamp(*cfg.log_alpha_range).exp()[0] * agent.entropy(probs)[0]))
+                probs = agent.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
+                bonuses.append(float(agent.temperature() * agent.entropy(probs)[0]))
             drug = int(probs[0].argmax())
     assert any(b > 0 for b in bonuses) and drug != first
     expected = rewards[0] + sum(cfg.gamma**k * (bonuses[k - 1] + rewards[k]) for k in range(1, len(rewards)))

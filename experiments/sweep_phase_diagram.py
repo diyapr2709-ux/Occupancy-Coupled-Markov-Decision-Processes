@@ -38,6 +38,7 @@ per-episode value, so every summary number can be recomputed.
 """
 
 import argparse
+import hashlib
 import itertools
 import json
 import os
@@ -50,7 +51,8 @@ from pathlib import Path
 
 import numpy as np
 
-from train_agent import ENV_KWARGS, PAIRED_DRUGS, ROOT, TIERS, cross_resistance, git_state, load_tiers
+from train_agent import (ENV_KWARGS, PAIRED_DRUGS, REPORT_SCHEMA, ROOT, TIERS, check_seed_file, check_test_launch, cross_resistance,
+                         git_state, launch_arguments, load_tiers, prereg_digest, record_launch)  # fmt: skip
 
 POLICIES = ("uniform", "greedy", "rotation", "planned-once", "replanned-every-4", "replanned-every-1")
 CONTRASTS = {  # name: (minuend, subtrahend); positive means the subtrahend fails less
@@ -130,6 +132,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier", choices=TIERS, required=True, help="seed tier: fixes the evaluation episodes")
     parser.add_argument("--prereg", type=Path, help="preregistration this sweep belongs to; required for --tier test")
+    parser.add_argument("--platform", help="label for the account or machine the jobs run on, not a personal name; required for val and test")
     parser.add_argument("--delays", type=int, nargs="+", default=[0, 1, 2, 4, 8])
     parser.add_argument("--lams", type=float, nargs="+", default=[0.0, 0.5, 0.8, 0.95])
     parser.add_argument("--sigmas", type=float, nargs="+", default=[0.0, 0.1, 0.2, 0.4])
@@ -147,6 +150,7 @@ def main() -> int:
         tier = load_tiers(args.seeds_file)[args.tier]
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
+    check_seed_file(parser, args.tier, tier, args.seeds_file)
     if min(args.delays) < 0 or len(set(args.delays)) != len(args.delays):
         parser.error("--delays must be distinct non-negative integers")
     if any(not 0.0 <= lam < 1.0 for lam in args.lams) or len(set(args.lams)) != len(args.lams):
@@ -165,12 +169,17 @@ def main() -> int:
         parser.error(f"--kappa/--delta: {exc}")
     if not 2 <= args.episodes <= len(tier):
         parser.error(f"--episodes must lie in [2, {len(tier)}]: an interval needs two, and episodes are drawn from the {args.tier} tier")
-    if args.tier == "test" and (args.prereg is None or not args.prereg.is_file()):
-        parser.error("--tier test needs --prereg pointing at an existing preregistration file")
     if args.out.exists() and not args.out.is_dir():
         parser.error(f"--out {args.out} exists and is not a directory")
     args.out.mkdir(parents=True, exist_ok=True)
     git = git_state()  # read at launch: the tree may change while the sweep is in progress
+    prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform) if args.tier == "test" else None
+    if args.tier != "dev" and not args.platform:
+        parser.error(f"--tier {args.tier} needs --platform naming the account or machine the jobs run on")
+    launch_id = f"phase_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    launch_args = launch_arguments(args)
+    prereg_sha256 = prereg_digest(args.prereg)
+    record_launch(args.out, launch_id, launch_args, git, args.backend, prereg_slug, prereg_sha256)
 
     sizes = tuple(args.class_sizes)
     cells = list(itertools.product(args.delays, args.lams, args.sigmas))
@@ -193,7 +202,11 @@ def main() -> int:
         by_cell[(r["delay"], r["lam"], r["sigma"])][r["policy"]] = r["expected_failure_rate"]
     base = cell_config(0, 0.0, 0.0, *instance)
     report = {
-        "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        "report_schema": REPORT_SCHEMA,
+        "launch_id": launch_id,
+        "platform": args.platform,
+        "prereg_sha256": prereg_sha256,
+        "args": launch_args,
         "git": git,
         "backend": backend,
         "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
@@ -203,7 +216,7 @@ def main() -> int:
         "results": results,
         "cells": [{"delay": d, "lam": lam, "sigma": s, **summarise_cell(by_cell[(d, lam, s)])} for d, lam, s in cells],
     }
-    path = args.out / f"phase_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
+    path = args.out / f"{launch_id}.json"
     path.write_text(json.dumps(report, indent=2))
 
     print(f"Class sizes {list(sizes)}, horizon {args.horizon}: {len(cells)} cells, {args.episodes} {args.tier}-tier episodes each")

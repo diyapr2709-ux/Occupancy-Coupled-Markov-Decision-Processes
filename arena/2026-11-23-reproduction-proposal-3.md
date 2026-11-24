@@ -155,14 +155,14 @@ All of this is written into a new dated preregistration before any run.
 - **Empirical parts:** what their code actually ran is a factual question, answered by the read-only look. The choice of target itself is not empirical.
 
 Files read:
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-reproduction-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-23-application-queries.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-23-reviewer-leads.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-prior-art-antibiotic-rl.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/seeds.yaml
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/budget.yaml
-- /private/tmp/claude-501/-Users-diyap-Occupancy-Coupled-Markov-Decision-Processes/dd0e1ca7-75ac-4fdd-9fa8-5a9faedfa4d9/scratchpad/plan-doc.txt
+- arena/2026-11-23-reproduction-criteria.md
+- inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
+- inbox/2026-11-23-application-queries.md
+- inbox/2026-11-23-reviewer-leads.md
+- inbox/2026-11-16-prior-art-antibiotic-rl.md
+- seeds.yaml
+- budget.yaml
+- <a scratch file outside the repository>
 
 Sources:
 - [Weaver et al. 2024, PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC11032439/)

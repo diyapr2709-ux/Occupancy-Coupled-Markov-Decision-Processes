@@ -37,13 +37,14 @@ Training and the phase diagram can run on Modal, one container per job, with `--
 | `ocmdp/envs/toy.py` | Gymnasium environment (`ocmdp/TwoDrug-v0`, `ocmdp/PairedDrugs-v0`) |
 | `ocmdp/envs/wrappers.py` | `MechanismObservation`: observe prescribing as selection pressure `x @ C` |
 | `ocmdp/components/pairwise.py` | Shared pairwise (state, embedded drug) scorer |
-| `ocmdp/components/policy_head.py` | Mixing policy head with state-dependent temperature `alpha(s)` |
+| `ocmdp/components/policy_head.py` | Mixing policy head over the embedded drugs; tied embeddings get equal probability |
 | `ocmdp/components/reserve_critic.py` | Efficacy-reserve critic, its per-quarter cost and TD target |
 | `ocmdp/components/constraint_filter.py` | Per-patient hard feasibility projection |
 | `ocmdp/objectives/pushforward_entropy.py` | `H(psi#pi)`: cluster form and cluster-free similarity-sensitive form `H_Z` |
-| `ocmdp/agents/losses.py` | Actor loss, temperature loss, state-dependent entropy target |
+| `ocmdp/agents/losses.py` | Actor loss, scalar temperature loss reflected at its clamp, entropy target inside the reachable range |
+| `ocmdp/agents/entropy_range.py` | Least and greatest entropy an agent's policy class can reach, given the drugs its networks cannot tell apart |
 | `ocmdp/agents/lagrangian.py` | Dual variable `xi`, projected ascent on a slow clock |
-| `ocmdp/agents/oc_sac.py` | Occupancy-coupled SAC: quarterly decisions, pushforward or action entropy, `alpha(s)`, reserve critic, dual variable |
+| `ocmdp/agents/oc_sac.py` | Occupancy-coupled SAC: quarterly decisions, pushforward or action entropy, one fixed or learned temperature, reserve critic, dual variable, checkpoints |
 | `ocmdp/agents/distill.py` | Behaviour cloning and DAgger from the oracle into the policy head |
 | `ocmdp/theory/two_drug.py` | Closed-form stationary analysis of the two-drug model |
 | `ocmdp/theory/mean_field.py` | Differentiable mean-field model that replays the environment exactly |
@@ -51,11 +52,13 @@ Training and the phase diagram can run on Modal, one container per job, with `--
 | `ocmdp/baselines/oracle.py` | Full-information oracle and the rotation search it starts from |
 | `ocmdp/eval/` | Rollout logging, metrics, seed protocol, V&V harness |
 | `experiments/validate.py` | Runs the harness and writes a JSON report to `runs/vv/` |
-| `experiments/train_agent.py` | Trains OC-SAC and standard SAC across seeds and compares them with the baselines; writes `runs/train/` |
+| `experiments/train_agent.py` | Trains OC-SAC and standard SAC across seeds, both agents of a seed in one job, and compares them with the baselines; writes `runs/train/` and a launch record per launch, with every trained agent under `runs/train/checkpoints/<tier>/` (test-tier checkpoints tracked in git, others archived with their hashes in the report) |
+| `experiments/verify_checkpoints.py` | Checks a report's checkpoint files against the sizes and SHA-256 hashes it records |
 | `experiments/planner_restarts.py` | Spread of the oracle's planned failure rate over planner seeds; writes `runs/planner/` |
 | `experiments/sweep_phase_diagram.py` | Heuristics and planners over a (delay, memory, noise) grid, paired per cell; writes `runs/phase/` |
 | `experiments/plot_phase_diagram.py` | Small-multiples figure of one phase-diagram contrast, with an optional prediction overlay; writes `figures/` |
 | `experiments/modal_backend.py` | Runs the jobs of the experiment scripts on Modal, with package versions and SIMD kernels pinned |
+| `provenance/` | Patches that rebuild the uncommitted code behind earlier reports, each checked against its report's recorded hash |
 | `experiments/predict_entropy_gap.py` | Failure-rate gap between class-entropy and drug-entropy soft-optimal schedules on the mean-field model; writes `runs/predict/` |
 | `experiments/score_phase_predictions.py` | Scores predicted sign changes of a phase-diagram contrast against measured ones, with a joint episode bootstrap |
 | `experiments/null_phase_predictions.py` | Theory-free predictions for held-out settings, carried over from the dev map |
@@ -112,6 +115,8 @@ Compare policies with `expected_failure_rate`, the mean failure probability of t
   | 0.2 | +0.031 [0.018, 0.044] |
   | 0.4 | +0.054 [0.014, 0.094] |
 
+  Source: `runs/vv/vv_20261025_201416_713126_29699.json` (`noise_robustness.replanning_gain`, 20 seeds).
+
   Absolute rates at σ = 0.4 vary widely between seeds, so read the paired gains.
 - **Splitting mass inside a cross-resistance class changes nothing.**
   - Within-class mixing has the same action entropy as cross-class mixing (0.856).
@@ -122,39 +127,18 @@ Compare policies with `expected_failure_rate`, the mean failure probability of t
   - The 98% end comes from observing prescribing as selection pressure.
   - These runs use the true `C` for the embeddings and the observation map, and the observation includes exact resistance.
 
-### Trained agents (preliminary)
+### Trained agents
 
-`experiments/train_agent.py` trains OC-SAC (pushforward entropy) and standard SAC (action entropy) on PairedDrugs. Settings:
-- 12 000 quarterly decisions per run;
-- 5 training seeds per variant;
-- each trained agent evaluated on 10 held-out episodes with jittered starting states;
-- the same episodes for every policy, so comparisons are paired.
+`experiments/train_agent.py` trains OC-SAC (entropy over mechanism classes) and standard SAC (entropy over drugs) on paired seeds. Each agent has one scalar temperature, fixed or learned toward a target inside the entropy range its own policy class can reach.
 
-The entropy target was chosen on separate validation episodes, from three candidates: rising (0.05→0.5 of the maximum entropy), lower (0.02→0.1) and flat (0.05). The rule was the best mean OC-SAC validation score across both noise levels, and the flat target won.
+No trained-agent result is reported yet. All ten reports in `runs/train/` (the latest is `train_20261123_194806_29133.json`) come from earlier versions of the agent, written before its state-dependent temperature was replaced by the current scalar one. They are diagnostics of those versions, and their seeds are not comparable with later runs. Results will appear here after a preregistered comparison has run, with intervals, the interquartile mean and the number of runs that learned.
 
-Expected failure rate (mean ± 95% interval over training seeds):
-
-| | σ = 0 | σ = 0.2 |
-|---|---|---|
-| OC-SAC | 0.351 ± 0.002 (5/5 learn) | 0.341 ± 0.003 (5/5) |
-| SAC | 0.351 ± 0.003 (5/5) | 0.344 ± 0.013 (5/5) |
-| myopic greedy | 0.372 | 0.341 |
-| tuned rotation | 0.347 | 0.363 |
-| oracle | 0.345 | 0.357 |
-| uniform | 0.389 | 0.421 |
-
-- **Without noise,** both agents capture 87% of the oracle's gain over uniform. They beat greedy, but trail the tuned rotation and the oracle by 0.004–0.006.
-- **With noise,** both match greedy and beat the oracle and the rotation. The oracle plans on the noise-free model, so it is not an upper bound here.
-- **Entropy space makes no measurable difference once the target is flat.** The paired OC-SAC − SAC difference is 0.000 ± 0.003 at σ = 0 and −0.002 ± 0.011 at σ = 0.2.
-- **The rising target separates the variants, in opposite directions.**
-  - At σ = 0, OC-SAC learned on 8/8 runs (validation and evaluation combined) against 6/8 for SAC.
-  - At σ = 0.2, OC-SAC learned on 2/8 runs against 8/8 for SAC.
-  - The rising target forces OC-SAC to mix mechanisms near fixation. The same validation-run policies score 0.318 when sampling and 0.267 when taking their most probable drug. Standard SAC meets the same target by splitting mass between interchangeable drugs, so it never has to mix mechanisms.
+An earlier version of this section compared three entropy targets on validation runs that were never logged. Those numbers are withdrawn.
 
 ## Seed protocol
 
-`ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)` is the harness protocol. The noise study uses 20 seeds, because its paired differences have a standard deviation of about 0.07 at σ = 0.4.
-- **Tiers.** `seeds.yaml` splits training seeds into three disjoint ranges: dev (0–99) for exploration, val (100–199) for choosing hyperparameters, test (1000–1099) for the single confirmatory run of a preregistration. `experiments/train_agent.py --tier` rejects seeds outside the tier.
-- **Evaluation episodes follow the tier.** A run is evaluated on episodes `10 000 + first seed of the tier + e`, so val and test episodes are never seen by a dev run. A test-tier run also needs `--prereg`.
-- **Run reports.** Each report under `runs/` records the tier, seeds, evaluation episodes, git commit, instance and entropy targets.
+`ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)` is the harness protocol. The noise study uses 20 seeds, because its paired differences spread widely at σ = 0.4 (`runs/vv/vv_20261025_201416_713126_29699.json`).
+- **Tiers.** `seeds.yaml` splits training seeds into three disjoint ranges: dev for exploration, val for choosing hyperparameters, test for the single confirmatory run of a preregistration. `experiments/train_agent.py --tier` rejects seeds outside the tier.
+- **Evaluation episodes follow the tier.** A run is evaluated on episodes `10 000 + first seed of the tier + e`, so val and test episodes are never seen by a dev run. A test-tier run also needs a committed preregistration in `preregistrations/` that names its platform, the owner's approval file, a clean tree, and no earlier test launch of the same preregistration; the scripts refuse it otherwise. They do not stop a different preregistration from reusing test seeds.
+- **Run reports.** Training and phase reports written by the current scripts record the tier, seeds, evaluation episodes, git state, platform label and instance, and training reports also record each agent's reachable entropy range and temperature. Older training reports lack some of these fields, and none records a platform label. The validation reports under `runs/vv/` record their seeds, but not the tier, git state or evaluation episodes.
 - **Independent streams.** The environment and the policy draw from independent random streams, so every policy faces the same patients and shocks for a given seed.

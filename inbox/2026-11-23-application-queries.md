@@ -21,3 +21,5 @@ Access date: 2026-11-23. This pass stopped at the turn limit after the first que
 ## Not opened (cited by another source only)
 
 - Weaver et al. (2024), "Reinforcement learning informs optimal treatment strategies to limit antibiotic resistance", PNAS. Cited in the abx_amr_simulator paper as a pathogen-level model with treatment cycling. Not opened; no URL, numeric results or code status verified. Candidate rung-1 reproduction target pending a check.
+
+Correction (validator check, 2026-11-24): "None uses RL to choose drug sequences" is contradicted by arXiv 2603.11369, an RL environment for antibiotic-prescribing policy (filed in inbox/2026-11-23-reviewer-leads.md).

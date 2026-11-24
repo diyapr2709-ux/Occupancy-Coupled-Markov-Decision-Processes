@@ -138,11 +138,11 @@ It is not fatal if the derived boundary is non-trivial in (delay, memory) and be
 - Allocation-protocol criteria, 2021, a near-optimal switching time: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8941386/ — snippet only, unverified.
 - Beardmore et al. 2017: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5400377/
 - Stooke, Achiam and Abbeel, ICML 2020: https://proceedings.mlr.press/v119/stooke20a.html — code location unverified.
-- All other sources are as filed in the inbox files under /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/.
+- All other sources are as filed in the inbox files under inbox/.
 
 Key repository files:
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-scope-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/predict_entropy_gap.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/score_phase_predictions.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/null_phase_predictions.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/core/coupling.py (C is restricted to [0,1], so collateral sensitivity cannot be represented)
+- arena/2026-11-23-scope-criteria.md
+- experiments/predict_entropy_gap.py
+- experiments/score_phase_predictions.py
+- experiments/null_phase_predictions.py
+- ocmdp/core/coupling.py (C is restricted to [0,1], so collateral sensitivity cannot be represented)

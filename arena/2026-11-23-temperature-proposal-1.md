@@ -154,17 +154,17 @@ It becomes fatal only if no grid value passes Step A for both agents. Then the r
 - No source I found computes the entropy floor over a network-restricted policy class. The reason it is absent: prior work assumes the policy class is the full simplex.
 
 **Files read:**
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-temperature-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/losses.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/oc_sac.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/objectives/pushforward_entropy.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/components/policy_head.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/train_agent.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/decisions/2026-11-23.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-23-reviewer-leads.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-discrete-sac.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-mechanism-level-sac.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261123_190717_20498.json
+- arena/2026-11-23-temperature-criteria.md
+- ocmdp/agents/losses.py
+- ocmdp/agents/oc_sac.py
+- ocmdp/objectives/pushforward_entropy.py
+- ocmdp/components/policy_head.py
+- experiments/train_agent.py
+- decisions/2026-11-23.md
+- inbox/2026-11-23-reviewer-leads.md
+- inbox/2026-11-16-discrete-sac.md
+- inbox/2026-11-16-mechanism-level-sac.md
+- runs/train/train_20261123_190717_20498.json
 
 Nothing was written.
 

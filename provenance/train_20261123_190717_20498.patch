@@ -1,0 +1,863 @@
+diff --git a/experiments/modal_backend.py b/experiments/modal_backend.py
+new file mode 100644
+index 0000000..f91edbd
+--- /dev/null
++++ b/experiments/modal_backend.py
+@@ -0,0 +1,60 @@
++"""Run the jobs of an experiment script on Modal instead of in local processes.
++
++    python experiments/train_agent.py --tier dev --backend modal
++    python experiments/sweep_phase_diagram.py --tier dev --backend modal
++
++A job is a call `module.function(job)` into one of SCRIPTS, and each runs in its own
++one-CPU container. The image pins numpy, torch (CPU build) and gymnasium to the versions
++installed locally, and the ocmdp package and the scripts are added from the working
++tree when the app starts, so a remote run executes the code the report's git state
++describes. Containers are x86-64 Linux: floating-point results need not match a local
++arm64 run bit for bit, which is why each report records its backend. Every job of one
++report runs on the same backend.
++"""
++
++import importlib
++import platform
++from importlib.metadata import version
++from pathlib import Path
++
++import modal
++
++HERE = Path(__file__).resolve().parent
++SCRIPTS = ("train_agent", "sweep_phase_diagram")
++PYTHON = ".".join(platform.python_version_tuple()[:2])
++PINNED = {name: version(name) for name in ("numpy", "torch", "gymnasium")}
++JOB_TIMEOUT = 4 * 3600  # seconds; the longest local job, a 12 000-quarter training run, takes under 10 minutes
++
++# Containers land on different x86 CPUs, and torch and MKL pick SIMD kernels per CPU, which changes
++# rounding and, in a chaotic training run, the outcome. Pinning both to their portable paths makes
++# every container do the same arithmetic.
++ARITHMETIC = {"ATEN_CPU_CAPABILITY": "default", "MKL_CBWR": "COMPATIBLE"}
++
++image = (
++    modal.Image.debian_slim(python_version=PYTHON)
++    .uv_pip_install(f"numpy=={PINNED['numpy']}", f"gymnasium=={PINNED['gymnasium']}")
++    .uv_pip_install(f"torch=={PINNED['torch']}", index_url="https://download.pytorch.org/whl/cpu")
++    .env(ARITHMETIC)
++    .add_local_python_source("ocmdp")
++)
++for script in SCRIPTS:
++    image = image.add_local_file(HERE / f"{script}.py", f"/root/{script}.py")
++app = modal.App("ocmdp-experiments", image=image)
++
++
++@app.function(cpu=1.0, timeout=JOB_TIMEOUT)
++def run_job(module: str, function: str, job: tuple):
++    return getattr(importlib.import_module(module), function)(job)
++
++
++def run_jobs(calls: list[tuple[str, str, tuple]]) -> list:
++    """(module, function, job) triples -> their results, in the same order."""
++    unknown = {module for module, _, _ in calls} - set(SCRIPTS)
++    if unknown:
++        raise ValueError(f"jobs must call into {SCRIPTS}, got {sorted(unknown)}")
++    with modal.enable_output(), app.run():
++        return list(run_job.starmap(calls))
++
++
++def description() -> dict:
++    return {"name": "modal", "python": PYTHON, "packages": PINNED, "cpu_per_job": 1.0, "environment": ARITHMETIC}
+diff --git a/experiments/plot_phase_diagram.py b/experiments/plot_phase_diagram.py
+new file mode 100644
+index 0000000..8bfec00
+--- /dev/null
++++ b/experiments/plot_phase_diagram.py
+@@ -0,0 +1,151 @@
++"""Draw one contrast of a phase-diagram report as small multiples, with an optional prediction overlay.
++
++    python experiments/plot_phase_diagram.py runs/phase/phase_<stamp>.json
++    python experiments/plot_phase_diagram.py runs/phase/phase_<stamp>.json --contrast greedy_over_rotation
++    python experiments/plot_phase_diagram.py runs/phase/phase_<stamp>.json --predictions predictions.json
++
++One panel per occupancy memory lam, delay on the x axis, one line per resistance noise
++level with its 95% interval at every point. Noise levels are ordered, so they take one
++hue from light to dark; sigma = 0 is grey, the floor the noisy lines are read against.
++A prediction file (a JSON list of {"delay", "lam", "sigma", <contrast>: value}) is drawn
++dashed with hollow markers in the same colours. Writes an SVG and a CSV of every plotted
++value to figures/, named after the report. Standard library only.
++"""
++
++import argparse
++import math
++import csv
++import json
++import sys
++from pathlib import Path
++
++SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e5e4e0"
++FLOOR = "#8a8984"  # sigma = 0
++RAMP = ("#86b6ef", "#2a78d6", "#104281")  # validated ordinal blue steps 250 / 450 / 650, light to dark
++PANEL_W, PANEL_H, GAP_X, GAP_Y, LEFT, TOP, BOTTOM, COLUMNS = 260, 190, 40, 70, 70, 84, 48, 2
++
++
++def series_colours(sigmas: list[float]) -> dict[float, str]:
++    noisy = sorted(s for s in sigmas if s > 0)
++    if len(noisy) > len(RAMP):
++        raise ValueError(f"at most {len(RAMP)} noisy levels fit the ramp, got {noisy}")
++    steps = {1: RAMP[1:2], 2: RAMP[::2], 3: RAMP}.get(len(noisy), ())
++    return {**{s: c for s, c in zip(noisy, steps)}, **({0.0: FLOOR} if 0.0 in sigmas else {})}
++
++
++def draw(report: dict, contrast: str, predictions: list[dict] | None) -> tuple[str, list[dict]]:
++    cells = report["cells"]
++    delays = sorted({c["delay"] for c in cells})
++    lams = sorted({c["lam"] for c in cells})
++    sigmas = sorted({c["sigma"] for c in cells})
++    colour = series_colours(sigmas)
++    lookup = {(c["delay"], c["lam"], c["sigma"]): c[contrast] for c in cells}
++    predicted = {(p["delay"], p["lam"], p["sigma"]): p[contrast] for p in predictions or [] if contrast in p}
++
++    lows = [a["mean"] - a["ci95"] for a in lookup.values()] + list(predicted.values()) + [0.0]
++    highs = [a["mean"] + a["ci95"] for a in lookup.values()] + list(predicted.values()) + [0.0]
++    lo, hi = min(lows), max(highs)
++    pad = 0.06 * (hi - lo or 1.0)
++    lo, hi = lo - pad, hi + pad
++
++    def origin(panel: int) -> tuple[float, float]:
++        row, col = divmod(panel, COLUMNS)
++        return LEFT + col * (PANEL_W + GAP_X), TOP + row * (PANEL_H + GAP_Y)
++
++    def y(panel: int, v: float) -> float:
++        return origin(panel)[1] + PANEL_H * (hi - v) / (hi - lo)
++
++    def x(panel: int, i: int, s: float) -> float:
++        offset = (s - (len(sigmas) - 1) / 2) * 5  # keep the intervals of different sigmas apart
++        return origin(panel)[0] + 18 + i * (PANEL_W - 36) / max(len(delays) - 1, 1) + offset
++
++    rows_of_panels = -(-len(lams) // COLUMNS)
++    width = LEFT + COLUMNS * (PANEL_W + GAP_X) + 30
++    height = TOP + rows_of_panels * (PANEL_H + GAP_Y) - GAP_Y + BOTTOM
++    out = [
++        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
++        f'font-family="Helvetica, Arial, sans-serif" font-size="12">',
++        f'<rect width="{width}" height="{height}" fill="{SURFACE}"/>',
++        f'<text x="{LEFT}" y="22" font-size="14" font-weight="bold" fill="{INK}">{contrast.replace("_", " ")}</text>',
++        f'<text x="{LEFT}" y="40" fill="{INK_2}">difference in expected failure rate, mean and 95% interval over '
++        f'{len(report["evaluation_episode_seeds"])} {report["args"]["tier"]}-tier episodes; dashed: prediction</text>',
++    ]
++    # legend, one entry per noise level, under the subtitle
++    for k, s in enumerate(sigmas):
++        out.append(f'<circle cx="{LEFT + 4 + k * 76}" cy="56" r="4" fill="{colour[s]}"/>')
++        out.append(f'<text x="{LEFT + 12 + k * 76}" y="60" fill="{INK_2}">σ = {s:g}</text>')
++
++    rows = []
++    for panel, lam in enumerate(lams):
++        px, py = origin(panel)
++        out.append(f'<text x="{px + PANEL_W / 2}" y="{py - 8}" text-anchor="middle" fill="{INK}">λ = {lam:g}</text>')
++        for tick in _ticks(lo, hi):
++            out.append(f'<line x1="{px}" x2="{px + PANEL_W}" y1="{y(panel, tick):.1f}" y2="{y(panel, tick):.1f}" stroke="{GRID}" stroke-width="1"/>')
++            if panel % COLUMNS == 0:
++                out.append(f'<text x="{px - 6}" y="{y(panel, tick) + 4:.1f}" text-anchor="end" fill="{INK_2}">{tick:+.3f}</text>')
++        out.append(f'<line x1="{px}" x2="{px + PANEL_W}" y1="{y(panel, 0):.1f}" y2="{y(panel, 0):.1f}" stroke="{INK_2}" stroke-width="1"/>')
++        for i, d in enumerate(delays):
++            out.append(f'<text x="{x(panel, i, (len(sigmas) - 1) / 2):.1f}" y="{py + PANEL_H + 18}" text-anchor="middle" fill="{INK_2}">{d}</text>')
++        out.append(f'<text x="{px + PANEL_W / 2}" y="{py + PANEL_H + 36}" text-anchor="middle" fill="{INK_2}">delay (quarters)</text>')
++        for s_index, s in enumerate(sigmas):
++            measured = [(i, lookup[(d, lam, s)]) for i, d in enumerate(delays) if (d, lam, s) in lookup]
++            points = " ".join(f"{x(panel, i, s_index):.1f},{y(panel, a['mean']):.1f}" for i, a in measured)
++            out.append(f'<polyline points="{points}" fill="none" stroke="{colour[s]}" stroke-width="2"/>')
++            for i, a in measured:
++                cx = x(panel, i, s_index)
++                out.append(f'<line x1="{cx:.1f}" x2="{cx:.1f}" y1="{y(panel, a["mean"] - a["ci95"]):.1f}" y2="{y(panel, a["mean"] + a["ci95"]):.1f}" stroke="{colour[s]}" stroke-width="1.5"/>')
++                out.append(f'<circle cx="{cx:.1f}" cy="{y(panel, a["mean"]):.1f}" r="4" fill="{colour[s]}" stroke="{SURFACE}" stroke-width="2"/>')
++                rows.append({"delay": delays[i], "lam": lam, "sigma": s, "mean": a["mean"], "ci95": a["ci95"],
++                             "predicted": predicted.get((delays[i], lam, s), "")})  # fmt: skip
++            guessed = [(i, predicted[(d, lam, s)]) for i, d in enumerate(delays) if (d, lam, s) in predicted]
++            if guessed:
++                points = " ".join(f"{x(panel, i, s_index):.1f},{y(panel, v):.1f}" for i, v in guessed)
++                out.append(f'<polyline points="{points}" fill="none" stroke="{colour[s]}" stroke-width="2" stroke-dasharray="5 4"/>')
++                for i, v in guessed:
++                    out.append(f'<circle cx="{x(panel, i, s_index):.1f}" cy="{y(panel, v):.1f}" r="4" fill="{SURFACE}" stroke="{colour[s]}" stroke-width="2"/>')
++        if panel == len(lams) - 1:  # direct labels at the line ends of the last panel, pushed apart to stay legible
++            ends = sorted((y(panel, lookup[(delays[-1], lam, s)]["mean"]), s) for s in sigmas if (delays[-1], lam, s) in lookup)
++            placed = []
++            for end, s in ends:
++                placed.append((max(end, placed[-1][0] + 13) if placed else end, s))
++            for label_y, s in placed:
++                out.append(f'<text x="{x(panel, len(delays) - 1, len(sigmas)) + 6:.1f}" y="{label_y + 4:.1f}" fill="{INK_2}">σ {s:g}</text>')
++    out.append("</svg>")
++    return "\n".join(out), rows
++
++
++def _ticks(lo: float, hi: float, n: int = 5) -> list[float]:
++    raw = (hi - lo) / n
++    magnitude = 10 ** math.floor(math.log10(raw))
++    step = next(m * magnitude for m in (1, 2, 2.5, 5, 10) if m * magnitude >= raw)
++    first = math.ceil(lo / step) * step
++    return [first + k * step for k in range(int((hi - first) / step) + 1)]
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("report", type=Path, help="a runs/phase/phase_*.json report")
++    parser.add_argument("--contrast", default="value_of_feedback")
++    parser.add_argument("--predictions", type=Path, help="JSON list of predicted cell values to overlay")
++    parser.add_argument("--out", type=Path, default=Path("figures"))
++    args = parser.parse_args()
++    report = json.loads(args.report.read_text())
++    if args.contrast not in report["contrasts"]:
++        parser.error(f"--contrast must be one of {sorted(report['contrasts'])}")
++    predictions = json.loads(args.predictions.read_text()) if args.predictions else None
++    if isinstance(predictions, dict):  # also accept {"cells": [...]}
++        predictions = predictions.get("cells", [])
++    svg, rows = draw(report, args.contrast, predictions)
++    args.out.mkdir(parents=True, exist_ok=True)
++    stem = f"{args.report.stem}_{args.contrast}"
++    (args.out / f"{stem}.svg").write_text(svg)
++    with open(args.out / f"{stem}.csv", "w", newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=["delay", "lam", "sigma", "mean", "ci95", "predicted"])
++        writer.writeheader()
++        writer.writerows(rows)
++    print(f"Wrote {args.out / stem}.svg and .csv")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/experiments/sweep_phase_diagram.py b/experiments/sweep_phase_diagram.py
+new file mode 100644
+index 0000000..7b17d7e
+--- /dev/null
++++ b/experiments/sweep_phase_diagram.py
+@@ -0,0 +1,192 @@
++"""Phase diagram of the coupling: where acting on the observed state beats committing to a schedule.
++
++    python experiments/sweep_phase_diagram.py --tier dev
++    python experiments/sweep_phase_diagram.py --tier dev --delays 0 1 4 --lams 0 0.8 --sigmas 0 0.2 --episodes 10
++    python experiments/sweep_phase_diagram.py --tier dev --backend modal
++
++Each cell of the grid is one environment: delay d (quarters before prescribing becomes
++selection pressure), occupancy memory lam (beta = 1 - lam is the weight of the newest
++quarter) and resistance noise sigma, on the instance given by --class-sizes. Every
++policy in a cell is rolled out on the same evaluation episodes of the tier, with the
++starting state jittered as in training, so differences within a cell are paired.
++
++Policies, none of them learned:
++  uniform            uniform mixing over drugs
++  greedy             the drug with the lowest current failure probability (closed loop, myopic)
++  rotation           the best class rotation, chosen on the mean-field model from the nominal start
++                     and never revised (a blind fixed schedule)
++  planned-once       the noise-free planner: plans the whole episode once, from the episode's true
++                     starting state, on the noise-free model, and commits to it
++  replanned-every-4  the same planner, replanning from the state reached every 4 quarters
++  replanned-every-1  the same planner, replanning every quarter
++
++Reported per cell, paired over episodes with 95% t-intervals:
++  value_of_feedback      planned-once minus replanned-every-1: what revising the plan from the
++                         observed state is worth over committing at the start, with the same planner.
++                         Without noise the model is exact and there is nothing new to observe, so any
++                         gain there is extra optimisation by the replanner, not feedback; that column
++                         is the floor the noisy columns are read against.
++  feedback_over_rotation rotation minus replanned-every-1
++  greedy_over_rotation   rotation minus greedy: a closed loop with no model against a blind schedule
++
++Planning only; nothing is trained. Writes a JSON report to runs/phase/ with every
++per-episode value, so every summary number can be recomputed.
++"""
++
++import argparse
++import itertools
++import json
++import os
++import platform
++import sys
++import time
++from concurrent.futures import ProcessPoolExecutor
++from dataclasses import asdict
++from pathlib import Path
++
++import numpy as np
++
++from train_agent import ENV_KWARGS, PAIRED_DRUGS, ROOT, TIERS, cross_resistance, git_state, load_tiers
++
++POLICIES = ("uniform", "greedy", "rotation", "planned-once", "replanned-every-4", "replanned-every-1")
++CONTRASTS = {  # name: (minuend, subtrahend); positive means the subtrahend fails less
++    "value_of_feedback": ("planned-once", "replanned-every-1"),
++    "feedback_over_rotation": ("rotation", "replanned-every-1"),
++    "greedy_over_rotation": ("rotation", "greedy"),
++}
++
++
++def cell_config(delay: int, lam: float, sigma: float, class_sizes: tuple[int, ...], horizon: int):
++    from ocmdp.envs.toy import ToyConfig
++
++    return ToyConfig(
++        cross_resistance=cross_resistance(class_sizes), delay=delay, lam=lam, resistance_noise=sigma, horizon_quarters=horizon, **ENV_KWARGS
++    )
++
++
++def make_policy(name: str, env):
++    from ocmdp.baselines.heuristics import MyopicGreedy, uniform_mixing
++    from ocmdp.baselines.oracle import FullInformationOracle, tuned_cycling
++
++    horizon = env.unwrapped.config.horizon_quarters
++    if name == "uniform":
++        return uniform_mixing(env.action_space.n)
++    if name == "greedy":
++        return MyopicGreedy()
++    if name == "rotation":
++        return tuned_cycling(env.unwrapped.config)
++    if name == "planned-once":
++        return FullInformationOracle(env, replan_every=horizon, name=name)
++    every = int(name.rsplit("-", 1)[1])
++    return FullInformationOracle(env, replan_every=every, name=name)
++
++
++def evaluate_cell_policy(job: tuple[int, float, float, tuple[int, ...], int, str, int, int]) -> dict:
++    """Roll one policy out on one cell's evaluation episodes."""
++    delay, lam, sigma, class_sizes, horizon, policy_name, episodes, first_episode = job
++    import torch
++
++    from ocmdp.envs.toy import ToyOCMDPEnv
++    from ocmdp.eval.metrics import expected_failure_rate
++    from ocmdp.eval.rollout import rollout
++    from ocmdp.eval.seeds import eval_seed
++
++    torch.set_num_threads(1)
++    env = ToyOCMDPEnv(cell_config(delay, lam, sigma, class_sizes, horizon))
++    policy = make_policy(policy_name, env)
++    start = time.time()
++    rates = [expected_failure_rate(rollout(env, policy, eval_seed(first_episode + e))) for e in range(episodes)]
++    return {"delay": delay, "lam": lam, "sigma": sigma, "policy": policy_name, "expected_failure_rate": rates, "seconds": time.time() - start}
++
++
++def summarise_cell(rates: dict[str, list[float]]) -> dict:
++    from ocmdp.eval.vv import aggregate
++
++    out = {"expected_failure_rate": {name: aggregate(values) for name, values in rates.items()}}
++    for contrast, (a, b) in CONTRASTS.items():
++        out[contrast] = aggregate(np.asarray(rates[a]) - np.asarray(rates[b]))
++    return out
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--tier", choices=TIERS, required=True, help="seed tier: fixes the evaluation episodes")
++    parser.add_argument("--prereg", type=Path, help="preregistration this sweep belongs to; required for --tier test")
++    parser.add_argument("--delays", type=int, nargs="+", default=[0, 1, 2, 4, 8])
++    parser.add_argument("--lams", type=float, nargs="+", default=[0.0, 0.5, 0.8, 0.95])
++    parser.add_argument("--sigmas", type=float, nargs="+", default=[0.0, 0.1, 0.2, 0.4])
++    parser.add_argument("--class-sizes", type=int, nargs="+", default=list(PAIRED_DRUGS), metavar="N", help="drugs per mechanism class")
++    parser.add_argument("--horizon", type=int, default=40, help="quarters per episode")
++    parser.add_argument("--episodes", type=int, default=20, help="evaluation episodes per cell, shared by every policy")
++    parser.add_argument("--seeds-file", type=Path, default=ROOT / "seeds.yaml", help="tier definitions")
++    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="local processes (--backend local)")
++    parser.add_argument("--backend", choices=("local", "modal"), default="local", help="where the jobs run; see experiments/modal_backend.py")
++    parser.add_argument("--out", type=Path, default=Path("runs/phase"))
++    args = parser.parse_args()
++    try:
++        tier = load_tiers(args.seeds_file)[args.tier]
++    except (OSError, ValueError) as exc:
++        parser.error(str(exc))
++    if min(args.delays) < 0 or len(set(args.delays)) != len(args.delays):
++        parser.error("--delays must be distinct non-negative integers")
++    if any(not 0.0 <= lam < 1.0 for lam in args.lams) or len(set(args.lams)) != len(args.lams):
++        parser.error("--lams must be distinct values in [0, 1)")
++    if any(not 0.0 <= s < np.inf for s in args.sigmas) or len(set(args.sigmas)) != len(args.sigmas):
++        parser.error("--sigmas must be distinct, finite and non-negative")
++    if len(args.class_sizes) < 2 or min(args.class_sizes) < 1:
++        parser.error("--class-sizes needs at least two classes of at least one drug each")
++    if args.horizon < 1:
++        parser.error("--horizon must be positive")
++    if not 2 <= args.episodes <= len(tier):
++        parser.error(f"--episodes must lie in [2, {len(tier)}]: an interval needs two, and episodes are drawn from the {args.tier} tier")
++    if args.tier == "test" and (args.prereg is None or not args.prereg.is_file()):
++        parser.error("--tier test needs --prereg pointing at an existing preregistration file")
++    if args.out.exists() and not args.out.is_dir():
++        parser.error(f"--out {args.out} exists and is not a directory")
++    args.out.mkdir(parents=True, exist_ok=True)
++    git = git_state()  # read at launch: the tree may change while the sweep is in progress
++
++    sizes = tuple(args.class_sizes)
++    cells = list(itertools.product(args.delays, args.lams, args.sigmas))
++    jobs = [(d, lam, s, sizes, args.horizon, p, args.episodes, tier.start) for d, lam, s in cells for p in POLICIES]
++    if args.backend == "modal":
++        import modal_backend
++
++        backend = modal_backend.description()
++        results = modal_backend.run_jobs([("sweep_phase_diagram", "evaluate_cell_policy", job) for job in jobs])
++    else:
++        backend = {"name": "local", "platform": platform.platform(), "workers": args.workers}
++        with ProcessPoolExecutor(args.workers) as pool:
++            results = list(pool.map(evaluate_cell_policy, jobs))
++
++    from ocmdp.eval.seeds import eval_seed
++
++    by_cell = {cell: {} for cell in cells}
++    for r in results:
++        by_cell[(r["delay"], r["lam"], r["sigma"])][r["policy"]] = r["expected_failure_rate"]
++    base = cell_config(0, 0.0, 0.0, sizes, args.horizon)
++    report = {
++        "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
++        "git": git,
++        "backend": backend,
++        "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
++        "instance": {k: v for k, v in asdict(base).items() if k not in ("delay", "lam", "resistance_noise")},
++        "policies": list(POLICIES),
++        "contrasts": {name: list(pair) for name, pair in CONTRASTS.items()},
++        "results": results,
++        "cells": [{"delay": d, "lam": lam, "sigma": s, **summarise_cell(by_cell[(d, lam, s)])} for d, lam, s in cells],
++    }
++    path = args.out / f"phase_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
++    path.write_text(json.dumps(report, indent=2))
++
++    print(f"Class sizes {list(sizes)}, horizon {args.horizon}: {len(cells)} cells, {args.episodes} {args.tier}-tier episodes each")
++    print(f"  {'delay':>5} {'lam':>5} {'sigma':>5}   " + "   ".join(f"{name} (95% interval)" for name in CONTRASTS))
++    for cell in report["cells"]:
++        row = "   ".join(f"{cell[name]['mean']:+.4f} ± {cell[name]['ci95']:.4f}" for name in CONTRASTS)
++        print(f"  {cell['delay']:>5} {cell['lam']:>5} {cell['sigma']:>5}   {row}")
++    print(f"\nReport: {path}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/experiments/train_agent.py b/experiments/train_agent.py
+index 299917d..a99eb52 100644
+--- a/experiments/train_agent.py
++++ b/experiments/train_agent.py
+@@ -2,6 +2,7 @@
+ 
+     python experiments/train_agent.py --tier dev                 # 5 seeds x 2 variants x 2 noise levels, in parallel
+     python experiments/train_agent.py --tier dev --seeds 0 1 --workers 4
++    python experiments/train_agent.py --tier dev --backend modal   # one Modal container per job
+     python experiments/train_agent.py --tier val --set entropy_low=0.05 entropy_high=0.05   # hyperparameter selection
+     python experiments/train_agent.py --tier dev --class-sizes 8 5 4 2 1   # 20 drugs in 5 unequal mechanism classes
+     python experiments/train_agent.py --tier test --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
+@@ -28,9 +29,12 @@ chose in evaluation.
+ """
+ 
+ import argparse
++import copy
++import hashlib
+ import json
+ import math
+ import os
++import platform
+ import re
+ import subprocess
+ import sys
+@@ -47,15 +51,19 @@ TIERS = ("dev", "val", "test")
+ DEFAULT_SEEDS = 5  # per variant and noise level when --seeds is not given: the first seeds of the tier
+ VARIANTS = {"oc-sac": {"entropy": "pushforward"}, "sac": {"entropy": "action"}}
+ PAIRED_DRUGS = (2, 2)  # class sizes of the default instance
++REPLANNER = "oracle[replans every quarter]"  # the planner to compare against under noise, where none is a bound
+ 
+ 
+-def make_env(sigma: float, class_sizes: tuple[int, ...] = PAIRED_DRUGS):
++def cross_resistance(class_sizes: tuple[int, ...]) -> tuple[tuple[float, ...], ...]:
+     """One mechanism per class, selected for only by the drugs of that class."""
++    return tuple(tuple(float(j == m) for j in range(len(class_sizes))) for m, size in enumerate(class_sizes) for _ in range(size))
++
++
++def make_env(sigma: float, class_sizes: tuple[int, ...] = PAIRED_DRUGS):
+     from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
+     from ocmdp.envs.wrappers import MechanismObservation
+ 
+-    rows = [tuple(float(j == m) for j in range(len(class_sizes))) for m, size in enumerate(class_sizes) for _ in range(size)]
+-    return MechanismObservation(ToyOCMDPEnv(ToyConfig(cross_resistance=tuple(rows), resistance_noise=sigma, **ENV_KWARGS)))
++    return MechanismObservation(ToyOCMDPEnv(ToyConfig(cross_resistance=cross_resistance(class_sizes), resistance_noise=sigma, **ENV_KWARGS)))
+ 
+ 
+ def imbalance_kl(class_sizes: tuple[int, ...]) -> float:
+@@ -76,19 +84,48 @@ def load_tiers(path: Path) -> dict[str, range]:
+     return tiers
+ 
+ 
++CODE_PATHS = ("ocmdp", "experiments", "pyproject.toml", "seeds.yaml")  # what a run executes or reads
++
++
+ def git_state() -> dict:
+-    """Commit of the working tree the run was launched from, and whether anything outside runs/ differs from it.
++    """Commit the run was launched from, whether the code differs from it, and a hash of the difference.
+ 
+-    Every launch appends to the ledger under runs/ and leaves a report there, so those
+-    files say nothing about whether the code is the committed code.
++    Only CODE_PATHS count: notes, gathered material and earlier reports change nothing a
++    run computes. Two runs with the same commit and the same `code_diff_sha256` ran the
++    same code, tracked edits and untracked files included.
+     """
+     def git(*args: str) -> str:
+-        return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
++        return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+ 
+     try:
+-        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain", "--", ".", ":(exclude)runs"))}
++        diff = git("diff", "HEAD", "--", *CODE_PATHS)
++        untracked = sorted(git("ls-files", "--others", "--exclude-standard", "--", *CODE_PATHS).split())
++        digest = hashlib.sha256(diff.encode())
++        for name in untracked:
++            digest.update(name.encode() + b"\0" + (ROOT / name).read_bytes())
++        dirty = bool(diff or untracked)
++        return {
++            "commit": git("rev-parse", "HEAD").strip(),
++            "dirty": dirty,
++            "code_diff_sha256": digest.hexdigest() if dirty else None,
++            "untracked_code": untracked,
++        }
+     except (OSError, subprocess.CalledProcessError):
+-        return {"commit": None, "dirty": None}
++        return {"commit": None, "dirty": None, "code_diff_sha256": None, "untracked_code": None}
++
++
++def host() -> dict:
++    """The machine a job ran on. Training is chaotic, so results reproduce only where the arithmetic is identical:
++    the same architecture and the same SIMD level torch dispatches to."""
++    import torch
++
++    cpu = platform.processor()
++    try:
++        with open("/proc/cpuinfo") as f:
++            cpu = next((line.split(":", 1)[1].strip() for line in f if line.startswith("model name")), cpu)
++    except OSError:
++        pass
++    return {"machine": platform.machine(), "cpu": cpu, "simd": torch.backends.cpu.get_cpu_capability()}
+ 
+ 
+ def _rollouts(env, policy, episodes: int, first_episode: int) -> list:
+@@ -146,28 +183,80 @@ def soft_returns(reward: np.ndarray, bonus: np.ndarray, gamma: float) -> np.ndar
+     return out
+ 
+ 
+-def _critic_check(agent, observations: np.ndarray, drugs: np.ndarray, logs: list) -> dict:
+-    """The reward critics' value of each drug chosen in the sampled evaluation against the soft return that followed it.
++def _continuation_return(snapshot, drug: int, agent, classes_rng: np.random.Generator) -> float:
++    """Soft return of giving `drug` for one quarter from `snapshot`, then following the agent's most probable drug.
+ 
+-    Errors are in units of the scaled reward. `return_sd` is the spread of the returns
+-    themselves, the scale an error has to be read against.
++    Runs on a copy of the environment, so with noise every counterfactual meets the same
++    shocks (common random numbers) and differences between drugs are paired.
+     """
+     import torch
+ 
++    from ocmdp.components.constraint_filter import sample_feasible
++
+     cfg = agent.cfg
++    env = copy.deepcopy(snapshot)
++    state = env.unwrapped.state()
++    quarter, mask, n_drugs = state["quarter"], state["action_mask"], env.action_space.n
++    rewards, bonuses, done = [], [0.0], False
++    while not done:
++        total, n = 0.0, 0
++        while not done:
++            obs, reward, terminated, truncated, info = env.step(sample_feasible(np.eye(n_drugs)[drug], mask, classes_rng))
++            total, n, done, mask = total + reward, n + 1, terminated or truncated, info["action_mask"]
++            if info["quarter"] != quarter:
++                break
++        rewards.append(cfg.reward_scale * total / n)
++        quarter = info["quarter"]
++        if not done:
++            with torch.no_grad():
++                probs, log_alpha = agent.policy(torch.as_tensor(obs, dtype=torch.float32)[None])
++                bonuses.append(float(log_alpha.clamp(*cfg.log_alpha_range).exp()[0] * agent.entropy(probs)[0]))
++            drug = int(probs[0].argmax())
++    return float(soft_returns(np.array([rewards]), np.array([bonuses]), cfg.gamma)[0, 0])
++
++
++def _critic_check(agent, snapshots: list, observations: np.ndarray, classes: list[tuple[int, ...]]) -> dict:
++    """Do the reward critics, and the actor, rank the classes the way the environment does?
++
++    At every quarterly decision of the sampled evaluation, each class (one drug stands for
++    its class: drugs in a class are interchangeable) is tried for one quarter on a copy of
++    the environment, then the agent's most probable drug is followed to the horizon. The
++    soft return that follows is the counterfactual value of that class under the agent's
++    own continuation; the critics estimate it for the sampling policy, which differs only
++    as far as the policy is not deterministic.
++
++    Values are in units of the scaled reward. Regret is the counterfactual value lost by
++    the class the critics (or the actor) rank first, against the best class; the mean gap
++    between the best and second-best class is the scale it is read against.
++    """
++    import torch
++
++    rng = np.random.default_rng(0)  # only used to resolve contraindications, of which the training environments have none
++    representatives = [c[0] for c in classes]
++    counterfactual = np.array([[_continuation_return(s, d, agent, rng) for d in representatives] for s in snapshots])
+     obs = torch.as_tensor(observations)
+     with torch.no_grad():
+-        probs, log_alpha = agent.policy(obs)
+-        bonus = log_alpha.clamp(*cfg.log_alpha_range).exp() * agent.entropy(probs)
+-        predicted = agent.q(obs).gather(1, torch.as_tensor(drugs)[:, None]).squeeze(1).double().numpy()
+-    reward = -cfg.reward_scale * np.stack([quarterly_failure(log) for log in logs])
+-    realised = soft_returns(reward, bonus.double().numpy().reshape(reward.shape), cfg.gamma).ravel()
+-    error = predicted - realised
++        critic = agent.q(obs)[:, representatives].double().numpy()
++        probs, _ = agent.policy(obs)
++    actor = np.stack([probs[:, list(c)].sum(-1).double().numpy() for c in classes], axis=-1)
++    best = counterfactual.max(axis=1)
++    ordered = np.sort(counterfactual, axis=1)
++
++    def regret(scores: np.ndarray) -> np.ndarray:
++        return best - counterfactual[np.arange(len(scores)), scores.argmax(axis=1)]
++
++    def centred(values: np.ndarray) -> np.ndarray:
++        return values - values.mean(axis=1, keepdims=True)
++
+     return {
+-        "bias": float(error.mean()),
+-        "rmse": float(np.sqrt(np.mean(error**2))),
+-        "return_sd": float(realised.std()),
+-        "correlation": float(np.corrcoef(predicted, realised)[0, 1]),
++        "states": len(snapshots),
++        "critic_ranks_best_class_first": float(np.mean(regret(critic) <= 1e-9)),
++        "actor_ranks_best_class_first": float(np.mean(regret(actor) <= 1e-9)),
++        "critic_choice_regret": float(regret(critic).mean()),
++        "actor_choice_regret": float(regret(actor).mean()),
++        "mean_gap_best_to_second": float((ordered[:, -1] - ordered[:, -2]).mean()),
++        "centred_value_rmse": float(np.sqrt(np.mean((centred(critic) - centred(counterfactual)) ** 2))),
++        "value_bias": float((critic - counterfactual).mean()),
+     }
+ 
+ 
+@@ -184,42 +273,101 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple[in
+     try:
+         result = train(env, cfg, seed)
+     except FloatingPointError as exc:
+-        return {"variant": variant, "sigma": sigma, "seed": seed, "diverged": str(exc)}
++        return {"variant": variant, "sigma": sigma, "seed": seed, "host": host(), "diverged": str(exc)}
+     agent = result.agent
+-    observations, drugs = [], []  # every quarterly decision of the sampled evaluation, in order
++    observations, snapshots = [], []  # every quarterly decision of the sampled evaluation, in order
+ 
+     def choose(obs, rng):
+         observations.append(np.array(obs, dtype=np.float32))
+-        drugs.append(agent.choose(obs, rng))
+-        return drugs[-1]
++        snapshots.append(copy.deepcopy(env))  # before the quarter's first patient
++        return agent.choose(obs, rng)
+ 
+     policy = QuarterlyChoicePolicy(choose, env.action_space.n, variant)
+     argmax = QuarterlyChoicePolicy(lambda obs, rng: agent.choose(obs, rng, greedy=True), env.action_space.n, variant)
+     logs = _rollouts(env, policy, episodes, first_episode)
+-    observations, drugs = np.stack(observations), np.array(drugs)
++    observations = np.stack(observations)
++    with torch.no_grad():
++        alpha_at_evaluation = agent.policy(torch.as_tensor(observations))[1].clamp(*cfg.log_alpha_range).exp().double().numpy()
+     return {
+         "variant": variant,
+         "sigma": sigma,
+         "seed": seed,
+         "seconds": time.time() - start,
++        "host": host(),
+         "learning_curve": [float(np.mean(result.episode_failure[i : i + 25])) for i in range(0, len(result.episode_failure), 25)],
+         **_episode_stats(env, logs, cfg.gamma),
+         "policy_entropy": _policy_entropy(np.stack([agent.probs(obs) for obs in observations]), env.unwrapped.coupling.identical_row_classes()),
+-        "critic": _critic_check(agent, observations, drugs, logs),
++        "critic": _critic_check(agent, snapshots, observations, env.unwrapped.coupling.identical_row_classes()),
++        "alpha_path": result.alpha,  # mean alpha(s) over each window of dual_update_every updates
++        "xi_path": result.xi,
++        "alpha_at_evaluation": {f"q{q}": float(np.percentile(alpha_at_evaluation, q)) for q in (10, 50, 90)},
+         "argmax": _episode_stats(env, _rollouts(env, argmax, episodes, first_episode), cfg.gamma),
+     }
+ 
+ 
++def committed_per_quarter(base):
++    """`base`'s most probable drug at the first decision of each quarter, given to every patient in that quarter.
++
++    The agents' policy class: one drug per quarter. The oracle may split a quarter
++    between drugs, which no agent can do, so this is the oracle's behaviour as far as
++    that class can copy it.
++    """
++    from ocmdp.baselines.heuristics import HeuristicPolicy
++
++    class CommittedPerQuarter(HeuristicPolicy):
++        name = f"{base.name}[one drug per quarter]"
++
++        def reset(self) -> None:
++            base.reset()
++            self._quarter, self._drug = None, None
++
++        def probs(self, obs: np.ndarray, info: dict) -> np.ndarray:
++            if info["quarter"] != self._quarter:
++                self._quarter, self._drug = info["quarter"], int(np.argmax(base.probs(obs, info)))
++            return np.eye(len(info["fail_prob"]))[self._drug]
++
++    policy = CommittedPerQuarter()
++    policy.reset()
++    return policy
++
++
+ def evaluate_baselines(job: tuple[float, int, int, tuple[int, ...], float]) -> dict:
+     sigma, episodes, first_episode, class_sizes, gamma = job
+     from ocmdp.baselines.heuristics import MyopicGreedy, uniform_mixing
+     from ocmdp.baselines.oracle import FullInformationOracle, tuned_cycling
+ 
+     env = make_env(sigma, class_sizes)
+-    policies = [uniform_mixing(env.action_space.n), MyopicGreedy(), tuned_cycling(env.unwrapped.config), FullInformationOracle(env)]
++    policies = [
++        uniform_mixing(env.action_space.n),
++        MyopicGreedy(),
++        tuned_cycling(env.unwrapped.config),
++        committed_per_quarter(FullInformationOracle(env)),
++        FullInformationOracle(env),
++        FullInformationOracle(env, replan_every=1, name=REPLANNER),
++    ]
+     return {"sigma": sigma, "baselines": {p.name: _episode_stats(env, _rollouts(env, p, episodes, first_episode), gamma) for p in policies}}
+ 
+ 
++def iqm(values) -> float:
++    """Interquartile mean: the mean after dropping int(n / 4) values from each end (scipy's trim_mean at 0.25)."""
++    v = np.sort(np.asarray(values, dtype=float))
++    cut = int(0.25 * v.size)
++    return float(v[cut : v.size - cut].mean())
++
++
++def probability_of_improvement(x, y) -> float:
++    """P(X < Y) over all pairs of runs, ties counting one half: how often a run of x fails less than a run of y."""
++    x, y = np.asarray(x, dtype=float)[:, None], np.asarray(y, dtype=float)[None, :]
++    return float(np.mean((x < y) + 0.5 * (x == y)))
++
++
++def bootstrap_ci95(values, resamples: int = 10_000, seed: int = 0) -> list[float]:
++    """Percentile 95% interval of the mean, resampling the given values (seeds) with replacement."""
++    v = np.asarray(values, dtype=float)
++    means = v[np.random.default_rng(seed).integers(v.size, size=(resamples, v.size))].mean(axis=1)
++    return [float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))]
++
++
+ def summarise(runs: list[dict], baselines: dict, sigma: float) -> dict:
+     from ocmdp.eval.vv import aggregate
+ 
+@@ -235,19 +383,32 @@ def summarise(runs: list[dict], baselines: dict, sigma: float) -> dict:
+         rates = np.array(list(per_seed.values()))
+         out[variant] = {
+             "expected_failure_rate": aggregate(rates),
++            "iqm_expected_failure_rate": iqm(rates),
+             "argmax_expected_failure_rate": aggregate([np.mean(r["argmax"]["expected_failure_rate"]) for r in done]),
+             "share_of_oracle_gain": aggregate((uniform - rates) / (uniform - oracle)),
+-            "runs_beating_uniform": int(np.sum(rates < uniform - 0.5 * (uniform - oracle))),
++            "runs_learned": int(np.sum(rates < uniform - 0.5 * (uniform - oracle))),  # more than half the oracle's gain over uniform
+             "runs": len(rates),
+             "diverged": sum(1 for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" in r),
+             "H_action": float(np.mean([r["H_action"] for r in done])),
+             "H_pushforward": float(np.mean([r["H_pushforward"] for r in done])),
+             "policy_entropy": {k: float(np.mean([r["policy_entropy"][k] for r in done])) for k in ("action", "within_class")},
+-            "critic": {k: float(np.mean([r["critic"][k] for r in done])) for k in ("bias", "rmse", "return_sd", "correlation")},
++            "critic": {k: float(np.mean([r["critic"][k] for r in done])) for k in done[0]["critic"]} if done else {},
++            "final_alpha": aggregate([r["alpha_path"][-1] for r in done if r["alpha_path"]]) if any(r["alpha_path"] for r in done) else None,
++            "minus_baseline_paired_by_episode": {
++                name: aggregate([np.mean(np.asarray(r["expected_failure_rate"]) - base[name]) for r in done]) for name in base
++            },
+         }
+         out["discounted_failure_rate"][variant] = aggregate([np.mean(r["discounted_failure_rate"]) for r in done])
+     shared = sorted(set(per_variant["oc-sac"]) & set(per_variant["sac"]))
+-    out["oc-sac minus sac (paired by seed)"] = aggregate([per_variant["oc-sac"][s] - per_variant["sac"][s] for s in shared])
++    diffs = [per_variant["oc-sac"][s] - per_variant["sac"][s] for s in shared]
++    out["oc-sac minus sac (paired by seed)"] = aggregate(diffs)
++    out["paired comparison"] = {
++        "seeds": shared,
++        "probability_oc_sac_fails_less": probability_of_improvement([per_variant["oc-sac"][s] for s in shared], [per_variant["sac"][s] for s in shared]),
++        "seeds_where_oc_sac_fails_less": int(np.sum(np.asarray(diffs) < 0)),
++        "bootstrap_ci95_of_mean_difference": bootstrap_ci95(diffs),
++        "iqm_of_difference": iqm(diffs),
++    }
+     return out
+ 
+ 
+@@ -273,7 +434,8 @@ def main() -> int:
+     parser.add_argument("--class-sizes", type=int, nargs="+", default=list(PAIRED_DRUGS), metavar="N", help="drugs per mechanism class")
+     parser.add_argument("--quarters", type=int, default=12_000, help="agent decisions per training run")
+     parser.add_argument("--episodes", type=int, default=10, help="held-out evaluation episodes per policy")
+-    parser.add_argument("--workers", type=int, default=os.cpu_count())
++    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="local processes (--backend local)")
++    parser.add_argument("--backend", choices=("local", "modal"), default="local", help="where the jobs run; see experiments/modal_backend.py")
+     parser.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE", help="SACConfig overrides, applied to both variants")
+     parser.add_argument("--out", type=Path, default=Path("runs/train"))
+     args = parser.parse_args()
+@@ -304,22 +466,36 @@ def main() -> int:
+     config = SACConfig(**{"total_quarters": args.quarters, **overrides})
+     sizes = tuple(args.class_sizes)
+     jobs = [(v, s, seed, args.quarters, args.episodes, overrides, tier.start, sizes) for s in args.sigmas for v in VARIANTS for seed in args.seeds]
+-    with ProcessPoolExecutor(args.workers) as pool:
+-        baseline_futures = [pool.submit(evaluate_baselines, (s, args.episodes, tier.start, sizes, config.gamma)) for s in args.sigmas]
+-        runs = list(pool.map(train_and_evaluate, jobs))
+-        baselines = {f.result()["sigma"]: f.result()["baselines"] for f in baseline_futures}
++    baseline_jobs = [(s, args.episodes, tier.start, sizes, config.gamma) for s in args.sigmas]
++    if args.backend == "modal":
++        import modal_backend
++
++        backend = modal_backend.description()
++        calls = [("train_agent", "evaluate_baselines", job) for job in baseline_jobs]
++        calls += [("train_agent", "train_and_evaluate", job) for job in jobs]
++        results = modal_backend.run_jobs(calls)
++        baseline_results, runs = results[: len(baseline_jobs)], results[len(baseline_jobs) :]
++    else:
++        backend = {"name": "local", "platform": platform.platform(), "workers": args.workers}
++        with ProcessPoolExecutor(args.workers) as pool:
++            baseline_futures = [pool.submit(evaluate_baselines, job) for job in baseline_jobs]
++            runs = list(pool.map(train_and_evaluate, jobs))
++            baseline_results = [f.result() for f in baseline_futures]
++    baselines = {result["sigma"]: result["baselines"] for result in baseline_results}
+ 
+     toy = make_env(0.0, sizes).unwrapped
+     max_entropy = {"oc-sac": math.log(toy.coupling.n_mechanisms), "sac": math.log(toy.coupling.n_drugs)}
+     report = {
+         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+         "git": git,
++        "backend": backend,
+         "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
+         "instance": {k: v for k, v in asdict(toy.config).items() if k != "resistance_noise"},
+         "class_structure": {"class_sizes": list(sizes), "imbalance_kl_nats": imbalance_kl(sizes)},
+         "entropy_target_nats": {v: [config.entropy_low * h, config.entropy_high * h] for v, h in max_entropy.items()},
+-        "sac_config": asdict(config),
++        "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides, **VARIANTS[v]})) for v in VARIANTS},
+         "runs": runs,
++        "baselines": {str(s): baselines[s] for s in args.sigmas},  # per-episode values, so every contrast can be recomputed
+     }
+     report["summary"] = {str(s): summarise(runs, baselines[s], s) for s in args.sigmas}
+     path = args.out / f"train_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
+@@ -336,19 +512,28 @@ def main() -> int:
+                 f"  {variant:30} {row['expected_failure_rate']['mean']:.4f} ± {row['expected_failure_rate']['ci95'] or 0:.4f}"
+                 f"   argmax {row['argmax_expected_failure_rate']['mean']:.4f}"
+                 f"   oracle gain captured {row['share_of_oracle_gain']['mean']:.0%}"
+-                f"   runs learning {row['runs_beating_uniform']}/{row['runs']}   diverged {row['diverged']}"
++                f"   runs learned {row['runs_learned']}/{row['runs']}   diverged {row['diverged']}"
+                 f"   H_action {row['H_action']:.3f}  H_pushforward {row['H_pushforward']:.3f}"
+                 f"   policy entropy inside classes {row['policy_entropy']['within_class']:.3f}"
+             )
+-        diff = summary["oc-sac minus sac (paired by seed)"]
+-        print(f"  oc-sac - sac (paired by seed): {diff['mean']:+.4f} ± {diff['ci95'] or 0:.4f}")
++        diff, paired = summary["oc-sac minus sac (paired by seed)"], summary["paired comparison"]
++        boot = paired["bootstrap_ci95_of_mean_difference"]
++        print(
++            f"  oc-sac - sac (paired by seed): {diff['mean']:+.4f} ± {diff['ci95'] or 0:.4f}   bootstrap [{boot[0]:+.4f}, {boot[1]:+.4f}]"
++            f"   IQM {paired['iqm_of_difference']:+.4f}   P(oc-sac fails less) {paired['probability_oc_sac_fails_less']:.2f}"
++            f"   oc-sac lower on {paired['seeds_where_oc_sac_fails_less']}/{len(paired['seeds'])} seeds"
++        )
+         discounted = summary["discounted_failure_rate"]
+         print(f"  failure rate discounted at {config.gamma} per quarter: " + "   ".join(f"{name} {agg['mean']:.4f}" for name, agg in discounted.items()))
+         for variant in VARIANTS:
+-            critic = summary[variant]["critic"]
++            critic, row = summary[variant]["critic"], summary[variant]
++            alpha = row["final_alpha"]["mean"] if row["final_alpha"] else float("nan")
++            versus = row["minus_baseline_paired_by_episode"][REPLANNER]
+             print(
+-                f"  {variant} critic against realised soft returns: bias {critic['bias']:+.3f}  rmse {critic['rmse']:.3f}"
+-                f"  (returns sd {critic['return_sd']:.3f})  correlation {critic['correlation']:.3f}"
++                f"  {variant}: critic ranks the best class first in {critic['critic_ranks_best_class_first']:.0%} of states,"
++                f" actor in {critic['actor_ranks_best_class_first']:.0%}; regret critic {critic['critic_choice_regret']:.3f},"
++                f" actor {critic['actor_choice_regret']:.3f} (mean gap {critic['mean_gap_best_to_second']:.3f}); final alpha {alpha:.2e};"
++                f" minus {REPLANNER} {versus['mean']:+.4f} ± {versus['ci95'] or 0:.4f}"
+             )
+     print(f"\nReport: {path}")
+     return 0
+diff --git a/pyproject.toml b/pyproject.toml
+index 9d8a829..7897174 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.26", "gymnasium>=0.29", "torch>=2.2"]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8"]
++modal = ["modal>=1.6"]  # experiments/train_agent.py --backend modal
+ 
+ [tool.setuptools.packages.find]
+ include = ["ocmdp*"]

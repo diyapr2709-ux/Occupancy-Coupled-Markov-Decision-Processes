@@ -225,16 +225,16 @@ The secondary objection concerns sub-question 4: without C, learning may fail. T
 
 ## Relevant files
 
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/arena/2026-11-23-scope-criteria.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/decisions/2026-11-23.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-mechanism-level-sac.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-oz-2014-ecoli-22-drug-cross-resistance.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/predict_entropy_gap.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/experiments/score_phase_predictions.py
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/envs/wrappers.py (where the true C reaches the observation)
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/ocmdp/agents/oc_sac.py (where the true C reaches the embeddings)
-- /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261123_190717_20498.json, /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261123_190750_20538.json, /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261116_233400_32604.json, /Users/diyap/Occupancy-Coupled-Markov-Decision-Processes/runs/train/train_20261026_145126_52656.json (source of the paired SDs used for power)
+- arena/2026-11-23-scope-criteria.md
+- decisions/2026-11-23.md
+- inbox/2026-11-16-mechanism-level-sac.md
+- inbox/2026-11-16-oz-2014-ecoli-22-drug-cross-resistance.md
+- inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md
+- experiments/predict_entropy_gap.py
+- experiments/score_phase_predictions.py
+- ocmdp/envs/wrappers.py (where the true C reaches the observation)
+- ocmdp/agents/oc_sac.py (where the true C reaches the embeddings)
+- runs/train/train_20261123_190717_20498.json, runs/train/train_20261123_190750_20538.json, runs/train/train_20261116_233400_32604.json, runs/train/train_20261026_145126_52656.json (source of the paired SDs used for power)
 
 Sources:
 - https://arxiv.org/abs/2610.33412

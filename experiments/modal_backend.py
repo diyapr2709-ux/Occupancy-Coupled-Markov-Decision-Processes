@@ -26,8 +26,9 @@ PINNED = {name: version(name) for name in ("numpy", "torch", "gymnasium")}
 JOB_TIMEOUT = 4 * 3600  # seconds; a 12 000-quarter training run with its evaluation has taken up to about 15 minutes
 
 # Containers land on different x86 CPUs, and torch and MKL pick SIMD kernels per CPU, which changes
-# rounding and, in a chaotic training run, the outcome. Both are pinned to their portable paths.
-# numpy's own dispatch is not: fields it computes have differed between containers by about 1e-15.
+# rounding and, in a chaotic training run, the outcome. Both are pinned to their portable paths, but
+# that does not make containers reproduce each other: numpy's and OpenBLAS's dispatch are not pinned,
+# and two identical pinned launches trained identically on only 7 of 10 jobs. Seeds are draws.
 ARITHMETIC = {"ATEN_CPU_CAPABILITY": "default", "MKL_CBWR": "COMPATIBLE"}
 
 image = (

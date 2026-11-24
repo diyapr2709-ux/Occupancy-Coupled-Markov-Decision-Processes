@@ -22,7 +22,7 @@ def null_predictions(dev_report: dict, contrast: str, beyond: int, settings: lis
     lines, _ = measured_lines([dev_report], contrast)
     rows = []
     for (_, _, _, delay, lam), (sigmas, values) in sorted(lines.items()):
-        sigma_star, sign = crossing(sigmas, values.mean(axis=1))
+        sigma_star, sign = crossing(sigmas, values.mean(axis=1), beyond)
         for setting in settings:
             rows.append({**{k: setting[k] for k in ("kappa", "delta", "horizon")}, "delay": delay, "lam": lam,
                          "sigma_star": sigma_star, "sign_at_max_sigma": sign})  # fmt: skip

@@ -42,4 +42,4 @@ None cheaply: the target's numbers are what they are. A proposal may name a shor
 
 ## Material
 
-CLAUDE.md; inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md; inbox/2026-11-23-application-queries.md; inbox/2026-11-23-reviewer-leads.md; inbox/2026-11-16-prior-art-antibiotic-rl.md; the plan at /private/tmp/claude-501/-Users-diyap-Occupancy-Coupled-Markov-Decision-Processes/dd0e1ca7-75ac-4fdd-9fa8-5a9faedfa4d9/scratchpad/plan-doc.txt (its final section on the claims ladder).
+CLAUDE.md; inbox/2026-11-16-weaver-2024-drug-cycling-dqn.md; inbox/2026-11-23-application-queries.md; inbox/2026-11-23-reviewer-leads.md; inbox/2026-11-16-prior-art-antibiotic-rl.md; the plan at <a scratch file outside the repository> (its final section on the claims ladder).

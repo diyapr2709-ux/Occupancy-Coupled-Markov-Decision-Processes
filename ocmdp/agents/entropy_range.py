@@ -39,7 +39,7 @@ def reachable_entropy_range(
     best = float(entropy(torch.softmax(starts, -1) @ spread).max())
     for _ in range(steps):
         value = entropy(torch.softmax(logits, -1) @ spread)
-        best = max(best, float(value.max()))
+        best = max(best, float(value.detach().max()))
         opt.zero_grad()
         (-value.sum()).backward()
         opt.step()
