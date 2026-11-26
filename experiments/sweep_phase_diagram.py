@@ -51,7 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
-from train_agent import (ENV_KWARGS, PAIRED_DRUGS, REPORT_SCHEMA, ROOT, TIERS, check_seed_file, check_test_launch, cross_resistance,
+from train_agent import (ENV_KWARGS, PAIRED_DRUGS, REPORT_SCHEMA, ROOT, TIERS, check_seed_file, check_test_launch, check_test_out, cross_resistance,
                          git_state, launch_arguments, load_tiers, prereg_digest, record_launch)  # fmt: skip
 
 POLICIES = ("uniform", "greedy", "rotation", "planned-once", "replanned-every-4", "replanned-every-1")
@@ -174,6 +174,8 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     git = git_state()  # read at launch: the tree may change while the sweep is in progress
     prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform) if args.tier == "test" else None
+    if args.tier == "test":
+        check_test_out(parser, args.out)
     if args.tier != "dev" and not args.platform:
         parser.error(f"--tier {args.tier} needs --platform naming the account or machine the jobs run on")
     launch_id = f"phase_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"

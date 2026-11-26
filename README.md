@@ -136,7 +136,7 @@ Unless a sentence names another report, every rate in this section is an expecte
 
 `experiments/train_agent.py` trains OC-SAC (entropy over mechanism classes) and standard SAC (entropy over drugs) on paired seeds. Each agent has one scalar temperature, fixed or learned toward a target inside the entropy range its own policy class can reach.
 
-No trained-agent result is reported yet. All ten reports in `runs/train/` (the latest is `train_20261123_194806_29133.json`) come from earlier versions of the agent, written before its state-dependent temperature was replaced by the current scalar one. They are diagnostics of those versions, and their seeds are not comparable with later runs. Results will appear here after a preregistered comparison has run, with intervals, the interquartile mean and the number of runs that learned.
+No trained-agent result is reported yet. All eleven reports in `runs/train/` (the latest is `train_20261124_155259_10168.json`) come from earlier versions of the agent or its training code. They are diagnostics of those versions, and their seeds are not comparable with later runs. Results will appear here after a preregistered comparison has run, with intervals, the interquartile mean and the number of runs that learned.
 
 An earlier version of this section compared three entropy targets on validation runs that were never logged. Those numbers are withdrawn.
 

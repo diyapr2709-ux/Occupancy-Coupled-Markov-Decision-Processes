@@ -3,7 +3,8 @@
     python experiments/null_phase_predictions.py runs/phase/phase_<dev>.json settings.json \\
         --contrast planned_once_minus_greedy --sign-beyond-crossing 1 > null_predictions.json
 
-settings.json is a JSON list of {"kappa", "delta", "horizon"}. For every held-out setting
+settings.json is a JSON list of {"kappa", "delta", "horizon"}, or an object holding that
+list under "settings" (as experiments/claim_a_heldout_settings.json does). For every held-out setting
 and every (delay, lam) line of the dev report, the predicted crossing is the one measured
 on dev for that line, in the format experiments/score_phase_predictions.py reads. A
 theory earns the word "predicts" only by placing crossings better than this.
@@ -29,6 +30,15 @@ def null_predictions(dev_report: dict, contrast: str, beyond: int, settings: lis
     return {"contrast": contrast, "sign_beyond_crossing": beyond, "lines": rows, "fitted_on": dev_report.get("evaluation_episode_seeds")}
 
 
+def load_settings(path: Path) -> list[dict]:
+    """The held-out settings: a bare list, or the list under "settings" in a held-out file that also records its rule."""
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    settings = spec["settings"] if isinstance(spec, dict) else spec
+    if not isinstance(settings, list) or not all(isinstance(s, dict) and {"kappa", "delta", "horizon"} <= set(s) for s in settings):
+        raise ValueError(f"{path} must hold a list of {{kappa, delta, horizon}} settings")
+    return settings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("dev_report", type=Path)
@@ -39,7 +49,11 @@ def main() -> int:
     report = json.loads(args.dev_report.read_text(encoding="utf-8"))
     if report["args"]["tier"] != "dev":
         parser.error("the null is fitted on the dev map only")
-    print(json.dumps(null_predictions(report, args.contrast, args.sign_beyond_crossing, json.loads(args.settings.read_text(encoding="utf-8"))), indent=2))
+    try:
+        settings = load_settings(args.settings)
+    except (KeyError, ValueError) as exc:
+        parser.error(str(exc))
+    print(json.dumps(null_predictions(report, args.contrast, args.sign_beyond_crossing, settings), indent=2))
     return 0
 
 

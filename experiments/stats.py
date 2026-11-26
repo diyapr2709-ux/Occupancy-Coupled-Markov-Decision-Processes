@@ -1,7 +1,8 @@
 """Student-t quantiles and intervals, standard library only, so every experiment script can use them without scipy.
 
-The evaluation harness's intervals read a 3-decimal t table and fall back to 1.96 above
-30 degrees of freedom; these are exact to about 1e-9.
+Quantiles come from bisection on the t CDF, written through the regularised incomplete beta
+function, and are exact to about 1e-9 at any degrees of freedom. The evaluation harness's
+own intervals use the same construction (`ocmdp.eval.vv._t975`).
 """
 
 import math

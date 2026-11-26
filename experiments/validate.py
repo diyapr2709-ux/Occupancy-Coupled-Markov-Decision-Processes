@@ -5,6 +5,9 @@
     python experiments/validate.py --verification-only
 
 Writes a JSON report to runs/vv/ and exits non-zero if any verification check fails.
+Seeds inside the test tier of seeds.yaml are refused, from --seeds and from the range
+--noise-seeds spans alike: the harness trains and evaluates on those seeds' episodes,
+which belong to the one-shot test tier.
 """
 
 import argparse
@@ -21,6 +24,7 @@ from ocmdp.envs.toy import ToyConfig
 from ocmdp.eval.seeds import SEEDS
 from ocmdp.eval.vv import comparator_table, distillation_study, lambda_misspecification, noise_robustness, run_verification
 from ocmdp.theory.two_drug import solve_two_drug
+from train_agent import ROOT, load_tiers
 
 COLUMNS = ["expected_failure_rate", "failure_rate", "regret", "first_fixation_q", "efficacy_reserve", "H_action", "H_pushforward"]
 ENV_IDS = ["ocmdp/TwoDrug-v0", "ocmdp/PairedDrugs-v0"]
@@ -63,6 +67,11 @@ def main() -> int:
         parser.error("seeds must be non-negative")
     if args.noise_seeds < 1:
         parser.error("--noise-seeds must be at least 1")
+    test = load_tiers(ROOT / "seeds.yaml")["test"]
+    if any(s in test for s in seeds):
+        parser.error(f"--seeds may not include test-tier seeds ({test.start}-{test.stop - 1} in seeds.yaml)")
+    if any(s in test for s in noise_seeds):
+        parser.error(f"--noise-seeds {args.noise_seeds} would reach the test tier, which starts at {test.start}")
     if args.out.exists() and not args.out.is_dir():
         parser.error(f"--out {args.out} exists and is not a directory")
     args.out.mkdir(parents=True, exist_ok=True)

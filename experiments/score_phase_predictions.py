@@ -13,7 +13,10 @@ the part of the grid that can resolve them: a line that shows that sign at every
 crossed below the grid (placed at the smallest positive sigma), one that does not end in
 it crosses above it (placed at the largest), and numeric crossings outside that range
 are clamped to it. Two crossings censored on the same side agree. The statistic is E,
-the median error over lines. Every report must share its evaluation episodes.
+the median error over every measured line: a line the predictions leave out has infinite
+error and is listed under not_predicted, so leaving lines out cannot improve E. Every
+report must share its evaluation episodes; a line's sigma points may be split across
+reports, but no sigma may be measured twice for one line.
 
 Uncertainty: episodes are resampled jointly across every cell of every line, which keeps
 the pairing of policies within a cell and of cells sharing an evaluation seed. E's 95%
@@ -44,23 +47,32 @@ Line = tuple[float, float, int, int, float]  # kappa, delta, horizon, delay, lam
 
 
 def measured_lines(reports: list[dict], contrast: str) -> tuple[dict[Line, tuple[np.ndarray, np.ndarray]], int]:
-    """Line -> (sigma grid, per-episode contrast of shape (sigmas, episodes)), and the common episode count."""
+    """Line -> (sigma grid, per-episode contrast of shape (sigmas, episodes)), and the common episode count.
+
+    A line's sigma points may come from several reports (a sweep split by sigma); they are
+    merged, and a sigma measured twice for the same line is refused rather than overwritten.
+    """
     minuend, subtrahend = CONTRASTS[contrast]
-    lines, episodes = {}, None
+    points: dict[Line, dict[float, np.ndarray]] = {}
+    episodes = None
     seeds = {json.dumps(report.get("evaluation_episode_seeds")) for report in reports}
     if len(seeds) > 1:
         raise ValueError("every report must use the same evaluation episodes (evaluation_episode_seeds differ)")
     for report in reports:
         inst = report["instance"]
         raw = {(r["delay"], r["lam"], r["sigma"], r["policy"]): np.asarray(r["expected_failure_rate"]) for r in report["results"]}
-        for delay, lam in sorted({(r["delay"], r["lam"]) for r in report["results"]}):
-            sigmas = np.array(sorted({r["sigma"] for r in report["results"] if (r["delay"], r["lam"]) == (delay, lam)}))
-            values = np.stack([raw[(delay, lam, s, minuend)] - raw[(delay, lam, s, subtrahend)] for s in sigmas])
+        for delay, lam, sigma in sorted({(r["delay"], r["lam"], r["sigma"]) for r in report["results"]}):
+            value = raw[(delay, lam, sigma, minuend)] - raw[(delay, lam, sigma, subtrahend)]
             if episodes is None:
-                episodes = values.shape[1]
-            if values.shape[1] != episodes:
+                episodes = value.shape[0]
+            if value.shape[0] != episodes:
                 raise ValueError("every report must use the same evaluation episodes")
-            lines[(inst["kappa"], inst["delta"], inst["horizon_quarters"], delay, lam)] = (sigmas, values)
+            line = points.setdefault((inst["kappa"], inst["delta"], inst["horizon_quarters"], delay, lam), {})
+            if sigma in line:
+                raise ValueError(f"sigma {sigma} is measured twice for line (kappa, delta, horizon, delay, lam) = "
+                                 f"{(inst['kappa'], inst['delta'], inst['horizon_quarters'], delay, lam)}")  # fmt: skip
+            line[sigma] = value
+    lines = {key: (np.array(sorted(by_sigma)), np.stack([by_sigma[s] for s in sorted(by_sigma)])) for key, by_sigma in points.items()}
     return lines, episodes
 
 
@@ -105,8 +117,16 @@ def line_error(sigmas: np.ndarray, measured: tuple[float | None, int], predicted
     return abs(math.log(place(*measured) / place(*predicted)))
 
 
+def _error(lines: dict, means: dict[Line, np.ndarray], predictions: dict, key: Line, beyond: int) -> float:
+    """A line's error; a measured line with no prediction has infinite error, so leaving a line out never helps."""
+    if key not in predictions:
+        return math.inf
+    return line_error(lines[key][0], crossing(lines[key][0], means[key], beyond), predictions[key], beyond)
+
+
 def median_error(lines: dict, means: dict[Line, np.ndarray], predictions: dict[Line, tuple[float | None, int]], beyond: int) -> float:
-    return float(np.median([line_error(lines[k][0], crossing(lines[k][0], means[k], beyond), predictions[k], beyond) for k in predictions]))
+    """Median error over every measured line, predicted or not."""
+    return float(np.median([_error(lines, means, predictions, k, beyond) for k in sorted(lines)]))
 
 
 def load_predictions(path: Path, lines: dict) -> tuple[str, int, dict[Line, tuple[float | None, int]], list[dict]]:
@@ -128,6 +148,13 @@ def load_predictions(path: Path, lines: dict) -> tuple[str, int, dict[Line, tupl
     return contrast, beyond, predictions, spec.get("directions", [])
 
 
+def _percentiles(values: list[float], q: list[float]) -> list[float]:
+    """Linear percentiles that stay infinite where any weight falls on an infinite value (numpy returns nan there)."""
+    huge = 1e300
+    finite = np.clip(np.asarray(values, dtype=float), -huge, huge)
+    return [math.copysign(math.inf, v) if abs(v) >= huge / 10 else float(v) for v in np.percentile(finite, q)]
+
+
 def score(lines: dict, episodes: int, predictions: dict, null: dict | None, directions: list[dict], beyond: int,
           margin: float, resamples: int, seed: int) -> dict:  # fmt: skip
     point = {k: lines[k][1].mean(axis=1) for k in lines}
@@ -143,13 +170,14 @@ def score(lines: dict, episodes: int, predictions: dict, null: dict | None, dire
             for key, value in _direction_shifts(lines, means, direction, beyond).items():
                 boot_dir.setdefault((d_index, key), []).append(value)
     e = median_error(lines, point, predictions, beyond)
-    lo, hi = np.percentile(boot_e, [2.5, 97.5])
+    lo, hi = _percentiles(boot_e, [2.5, 97.5])
     out = {
         "lines": [
             {"line": dict(zip(("kappa", "delta", "horizon", "delay", "lam"), k)), "measured_crossing": crossing(lines[k][0], point[k], beyond)[0],
-             "predicted_crossing": predictions[k][0], "error": line_error(lines[k][0], crossing(lines[k][0], point[k], beyond), predictions[k], beyond)}
-            for k in predictions
+             "predicted_crossing": predictions[k][0], "error": _error(lines, point, predictions, k, beyond)}
+            for k in sorted(lines) if k in predictions
         ],  # fmt: skip
+        "not_predicted": [dict(zip(("kappa", "delta", "horizon", "delay", "lam"), k)) for k in sorted(lines) if k not in predictions],
         "E": e,
         "E_ci95": [float(lo), float(hi)],
         "margin": margin,
@@ -158,7 +186,7 @@ def score(lines: dict, episodes: int, predictions: dict, null: dict | None, dire
     if null:
         diff = np.asarray(boot_e) - np.asarray(boot_null)
         out["E_null"] = median_error(lines, point, null, beyond)
-        out["E_minus_E_null_ci95"] = [float(v) for v in np.percentile(diff, [2.5, 97.5])]
+        out["E_minus_E_null_ci95"] = _percentiles(diff, [2.5, 97.5])
     out["directions"] = []
     for d_index, direction in enumerate(directions):
         for key, value in _direction_shifts(lines, point, direction, beyond).items():

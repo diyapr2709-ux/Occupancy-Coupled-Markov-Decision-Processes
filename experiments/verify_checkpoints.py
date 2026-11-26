@@ -6,7 +6,10 @@
 Checkpoint paths in a report are relative to the report's folder, so an archived
 checkpoint folder is checked by restoring it next to its report. With --load, each
 agent's final checkpoint is also rebuilt and its weight hash compared with the run's
-recorded parameter_sha256.final. Prints every problem and exits 1 if there is any.
+recorded parameter_sha256.final. A run that trained (did not diverge) but records no
+checkpoint is a problem, so a report with no checkpoints at all never passes, and with
+--load so is a run that records no final weight hash to compare. Prints every problem and
+exits 1 if there is any.
 """
 
 import argparse
@@ -22,6 +25,11 @@ def verify(report_path: Path, load: bool = False) -> list[str]:
     problems = []
     for run in report["runs"]:
         entries = run.get("checkpoints", [])
+        label = f"{run.get('variant')} sigma {run.get('sigma')} seed {run.get('seed')}"
+        if not entries and "diverged" not in run:
+            problems.append(f"no checkpoint recorded: {label}")
+        if load and entries and "final" not in run.get("parameter_sha256", {}):
+            problems.append(f"no final weight hash to compare: {label}")
         final = max((entry["decisions"] for entry in entries), default=None)
         for entry in entries:
             path = report_path.parent / entry["path"]
@@ -32,7 +40,7 @@ def verify(report_path: Path, load: bool = False) -> list[str]:
             if len(blob) != entry["bytes"] or hashlib.sha256(blob).hexdigest() != entry["sha256"]:
                 problems.append(f"size or SHA-256 differs from the report: {entry['path']}")
                 continue
-            if load and entry["decisions"] == final and "parameter_sha256" in run:
+            if load and entry["decisions"] == final and "final" in run.get("parameter_sha256", {}):
                 from ocmdp.agents.oc_sac import load_checkpoint, parameter_sha256
 
                 agent, _ = load_checkpoint(blob)

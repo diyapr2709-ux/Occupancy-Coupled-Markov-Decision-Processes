@@ -1,0 +1,40 @@
+{
+ "fixed": "2026-11-26, before any run at these settings and before the blind derivation starts",
+ "supersedes": "experiments/claim_a_heldout_cells.json (new (delay, lam) lines that the theory-free null cannot predict)",
+ "rule": "the dev map's instance (kappa 0.1, delta 0.05, horizon 40, class sizes [2, 2]) with one rate doubled at a time",
+ "settings": [
+  {
+   "kappa": 0.2,
+   "delta": 0.05,
+   "horizon": 40
+  },
+  {
+   "kappa": 0.1,
+   "delta": 0.1,
+   "horizon": 40
+  }
+ ],
+ "class_sizes": [
+  2,
+  2
+ ],
+ "delays": [
+  0,
+  1,
+  2,
+  4,
+  8
+ ],
+ "lams": [
+  0.0,
+  0.5,
+  0.8,
+  0.95
+ ],
+ "sigmas": [
+  0.0,
+  0.1,
+  0.2,
+  0.4
+ ]
+}

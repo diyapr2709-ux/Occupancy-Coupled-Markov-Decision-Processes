@@ -6,7 +6,7 @@
     python experiments/train_agent.py --tier val --platform modal-a --set temperature=fixed alpha=0.1   # one temperature candidate
     python experiments/train_agent.py --tier val --platform modal-a --checkpoint-every 3000   # also save each agent at 3000, 6000, 9000
     python experiments/train_agent.py --tier dev --class-sizes 8 5 4 2 1   # 20 drugs in 5 unequal mechanism classes
-    python experiments/train_agent.py --tier test --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
+    python experiments/train_agent.py --tier test --platform rtx-1 --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
 
 Seeds come in three disjoint tiers, read from seeds.yaml: dev for exploration, val for
 choosing hyperparameters, test for the one confirmatory run of a preregistration. A
@@ -35,11 +35,14 @@ job records its host, its arithmetic and hashes of the agent's weights at
 initialisation, after the first update window and at the end: training is chaotic, so
 runs agree seed by seed only where all of these agree. A launch on the test tier is
 refused unless its preregistration is committed and unmodified, approvals/<preregistration
-name>.ok exists, the code is committed, and no earlier launch used that
-preregistration's test seeds: the rules of the repository's tier guard, enforced here
-so they hold on any machine. The preregistration also names the platform its val
-selection ran on (a `platform:` line), and a test launch from any other platform is
-refused, so selection and test share one arithmetic.
+name>.ok exists, the code is committed, and no earlier test launch used that
+preregistration: the rules of the repository's tier guard, enforced here so they hold on
+any machine. The preregistration also names the platform its val selection ran on (a
+`platform:` line), and a test launch from any other platform is refused, so selection
+and test share one arithmetic. A test launch also lists its seeds explicitly, at least
+ten of them, exactly as the preregistration's `seeds:` line names them, and none used by
+an earlier test launch of this script under any preregistration. It writes into a folder
+directly under runs/, where every later launch looks for earlier test launch records.
 
 The instance is one mechanism class per entry of --class-sizes, each holding that many
 interchangeable drugs; the default, two classes of two, is PairedDrugs. The report
@@ -74,6 +77,7 @@ ENV_KWARGS = dict(expected_reward=True, markov_observation=True, r0_spread=0.04,
 ROOT = Path(__file__).resolve().parents[1]
 TIERS = ("dev", "val", "test")
 DEFAULT_SEEDS = 5  # per variant and noise level when --seeds is not given: the first seeds of the tier
+MIN_TEST_SEEDS = 10  # a test launch names at least this many seeds, the repository's tier guard's minimum
 REPORT_SCHEMA = 2  # 2 adds launch records, the platform label, weight hashes and checkpoints
 MODAL_ENV = ("MODAL_TASK_ID", "MODAL_REGION", "MODAL_CLOUD_PROVIDER", "MODAL_IMAGE_ID")  # set inside Modal containers
 _jobs_in_process = 0  # jobs this process (a worker, or a reused Modal container) has started
@@ -184,17 +188,57 @@ def host(job_in_process: int | None = None) -> dict:
 
 
 def check_seed_file(parser: argparse.ArgumentParser, tier_name: str, tier: range, seeds_file: Path) -> None:
-    """Stop a launch whose seed file would reach the repository's test seeds from any tier but test.
+    """Stop a launch whose seed file would relabel the repository's seeds of one tier as another's.
 
-    --seeds-file may define other tiers, but none of them may overlap the test range of the
-    repository's seeds.yaml, and a test-tier launch must use that file itself.
+    --seeds-file may define its own ranges, but no tier of it may overlap a different tier
+    of the repository's seeds.yaml, so val or test seeds never run as dev; a test-tier
+    launch must use that file itself.
     """
-    repository_test = load_tiers(ROOT / "seeds.yaml")["test"]
-    if tier_name == "test":
-        if seeds_file.resolve() != (ROOT / "seeds.yaml").resolve():
-            parser.error("the test tier must use the repository's seeds.yaml")
-    elif tier.start < repository_test.stop and repository_test.start < tier.stop:
-        parser.error(f"the {tier_name} tier of {seeds_file.name} overlaps the repository's test seeds [{repository_test.start}, {repository_test.stop - 1}]")
+    repository = load_tiers(ROOT / "seeds.yaml")
+    if tier_name == "test" and seeds_file.resolve() != (ROOT / "seeds.yaml").resolve():
+        parser.error("the test tier must use the repository's seeds.yaml")
+    for name, own in load_tiers(seeds_file).items():
+        for other, theirs in repository.items():
+            if other != name and own.start < theirs.stop and theirs.start < own.stop:
+                parser.error(f"the {name} tier of {seeds_file.name} overlaps the repository's {other} seeds [{theirs.start}, {theirs.stop - 1}]")
+
+
+def check_test_out(parser: argparse.ArgumentParser, out: Path) -> None:
+    """Stop a test-tier launch that would write outside a folder directly under runs/.
+
+    Earlier test launches are found from the launch records under runs/*/launches, so a
+    record written anywhere else would let a second launch of the same preregistration
+    through.
+    """
+    if out.resolve().parent != (ROOT / "runs").resolve():
+        parser.error(f"--tier test writes into a folder directly under runs/ (such as runs/train), not {out}")
+
+
+def check_test_seeds(parser: argparse.ArgumentParser, prereg: Path | None, seeds: list[int] | None, out: Path) -> None:
+    """Stop a test-tier training launch whose seeds are not the preregistration's own, unused ones.
+
+    The seeds must be given explicitly, at least ten of them, and match as a set the
+    preregistration's `seeds:` line (integers separated by spaces or commas, brackets
+    allowed). No seed may appear in an earlier test-tier launch of this script, whatever
+    its preregistration, so test preregistrations train on disjoint seeds.
+    """
+    if seeds is None:
+        parser.error("the test tier needs --seeds listing the preregistration's test seeds explicitly")
+    if len(set(seeds)) < MIN_TEST_SEEDS:
+        parser.error(f"the test tier needs at least {MIN_TEST_SEEDS} distinct seeds, got {len(set(seeds))}")
+    if prereg is not None and prereg.is_file():
+        named = re.findall(r"^seeds:[ \t]*\[?([0-9, \t]*)\]?[ \t]*$", prereg.read_text(encoding="utf-8"), re.M)
+        if len(named) != 1 or not named[0].strip(" \t,"):
+            parser.error(f"{prereg.name} must list its test seeds in exactly one `seeds:` line")
+        listed = {int(s) for s in re.split(r"[, \t]+", named[0].strip(" \t,"))}
+        if listed != set(seeds):
+            parser.error(f"--seeds differ from the `seeds:` line of {prereg.name}: {sorted(listed)}")
+    for record in sorted({*ROOT.glob("runs/*/launches/*.json"), *out.glob("launches/*.json")}):
+        earlier = json.loads(record.read_text(encoding="utf-8"))
+        if earlier.get("tier") == "test" and str(earlier.get("launch_id", "")).startswith("train_"):
+            reused = sorted(set(seeds) & set(earlier.get("args", {}).get("seeds") or []))
+            if reused:
+                parser.error(f"test seeds {reused} were already used by launch {earlier.get('launch_id')}")
 
 
 def earlier_test_launches(slug: str, out: Path) -> list[str]:
@@ -672,6 +716,11 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
         per_variant[variant] = per_seed
         by_seed[variant] = {r["seed"]: r["expected_failure_rate"] for r in done}
         rates = np.array(list(per_seed.values()))
+        diverged = sum(1 for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" in r)
+        if not done:  # nothing to aggregate; the report still records every run and baseline
+            out[variant] = {"all_runs_diverged": True, "runs": 0, "runs_learned": 0, "diverged": diverged}
+            out["discounted_failure_rate"][variant] = None
+            continue
         out[variant] = {
             "expected_failure_rate": aggregate(rates),
             "iqm_expected_failure_rate": iqm(rates),
@@ -680,7 +729,7 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
             "share_of_replanner_gain": aggregate((uniform - rates) / (uniform - base[REPLANNER].mean())),
             "runs_learned": int(np.sum(rates < uniform - 0.5 * (uniform - oracle))),  # more than half the oracle's gain over uniform
             "runs": len(rates),
-            "diverged": sum(1 for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" in r),
+            "diverged": diverged,
             "H_action": float(np.mean([r["H_action"] for r in done])),
             "H_pushforward": float(np.mean([r["H_pushforward"] for r in done])),
             "policy_entropy": {k: float(np.mean([r["policy_entropy"][k] for r in done])) for k in ("action", "within_class")},
@@ -695,6 +744,10 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
         out["discounted_failure_rate"][variant] = aggregate([np.mean(r["discounted_failure_rate"]) for r in done])
     shared = sorted(set(per_variant["oc-sac"]) & set(per_variant["sac"]))
     diffs = [per_variant["oc-sac"][s] - per_variant["sac"][s] for s in shared]
+    if not shared:
+        out["oc-sac minus sac (paired by seed)"] = None
+        out["paired comparison"] = {"seeds": [], "not_computed": "no seed has a finished run of both agents"}
+        return out
     out["oc-sac minus sac (paired by seed)"] = aggregate(diffs)
     out["paired comparison"] = {
         "seeds": shared,
@@ -713,12 +766,15 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
     return out
 
 
-def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str]) -> dict:
+def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str], quarters: int) -> dict:
+    """--set KEY=VALUE pairs as SACConfig overrides, checked at the run's own length (--quarters, which --set may not change)."""
     from ocmdp.agents.oc_sac import SACConfig
 
     defaults, overrides = asdict(SACConfig()), {}
     for pair in pairs:
         key, _, value = pair.partition("=")
+        if key == "total_quarters":
+            parser.error("--set total_quarters is not accepted: the run length is --quarters")
         if key == "entropy" or type(defaults.get(key)) not in (int, float, str) or not value:
             parser.error(f"--set takes KEY=VALUE for a numeric SACConfig field or temperature (entropy is set per variant), got {pair!r}")
         try:
@@ -726,7 +782,7 @@ def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str]) -> dict:
         except ValueError:
             parser.error(f"--set {key} needs a {type(defaults[key]).__name__}, got {value!r}")
     try:
-        SACConfig(**overrides)
+        SACConfig(**{"total_quarters": quarters, **overrides})
     except ValueError as exc:
         parser.error(f"--set: {exc}")
     return overrides
@@ -761,6 +817,7 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     check_seed_file(parser, args.tier, tier, args.seeds_file)
+    given_seeds = args.seeds
     if args.seeds is None:
         args.seeds = list(tier[:DEFAULT_SEEDS])
     outside = sorted(set(args.seeds) - set(tier))
@@ -776,9 +833,12 @@ def main() -> int:
         parser.error("--delay must be non-negative and --lam must lie in [0, 1)")
     if args.checkpoint_every is not None and (args.tier != "val" or not args.quarters / 4 <= args.checkpoint_every < args.quarters):
         parser.error("--checkpoint-every is for checkpoint choice on val only, in [--quarters / 4, --quarters): at most three per agent")
-    overrides = _parse_overrides(parser, args.set)
+    overrides = _parse_overrides(parser, args.set, args.quarters)
     git = git_state()  # read at launch: the tree may change while the run is in progress
     prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform) if args.tier == "test" else None
+    if args.tier == "test":
+        check_test_out(parser, args.out)
+        check_test_seeds(parser, args.prereg, given_seeds, args.out)
     if args.tier != "dev" and not args.platform:
         parser.error(f"--tier {args.tier} needs --platform naming the account or machine the jobs run on")
     if args.tier == "val" and git["dirty"] is not False:
@@ -844,6 +904,9 @@ def main() -> int:
             print(f"  {name:30} {agg['mean']:.4f} ± {agg['ci95']:.4f}")
         for variant in VARIANTS:
             row = summary[variant]
+            if row.get("all_runs_diverged"):
+                print(f"  {variant:30} all {row['diverged']} runs diverged")
+                continue
             print(
                 f"  {variant:30} {row['expected_failure_rate']['mean']:.4f} ± {row['expected_failure_rate']['ci95'] or 0:.4f}"
                 f"   argmax {row['argmax_expected_failure_rate']['mean']:.4f}"
@@ -853,15 +916,20 @@ def main() -> int:
                 f"   policy entropy inside classes {row['policy_entropy']['within_class']:.3f}"
             )
         diff, paired = summary["oc-sac minus sac (paired by seed)"], summary["paired comparison"]
-        boot = paired["bootstrap_ci95_of_mean_difference"]
-        print(
-            f"  oc-sac - sac (paired by seed): {diff['mean']:+.4f} ± {diff['ci95'] or 0:.4f}   bootstrap [{boot[0]:+.4f}, {boot[1]:+.4f}]"
-            f"   IQM {paired['iqm_of_difference']:+.4f}   P(oc-sac fails less) {paired['probability_oc_sac_fails_less']:.2f}"
-            f"   oc-sac lower on {paired['seeds_where_oc_sac_fails_less']}/{len(paired['seeds'])} seeds"
-        )
-        discounted = summary["discounted_failure_rate"]
+        if diff is None:
+            print(f"  oc-sac - sac (paired by seed): not computed, {paired['not_computed']}")
+        else:
+            boot = paired["bootstrap_ci95_of_mean_difference"]
+            print(
+                f"  oc-sac - sac (paired by seed): {diff['mean']:+.4f} ± {diff['ci95'] or 0:.4f}   bootstrap [{boot[0]:+.4f}, {boot[1]:+.4f}]"
+                f"   IQM {paired['iqm_of_difference']:+.4f}   P(oc-sac fails less) {paired['probability_oc_sac_fails_less']:.2f}"
+                f"   oc-sac lower on {paired['seeds_where_oc_sac_fails_less']}/{len(paired['seeds'])} seeds"
+            )
+        discounted = {name: agg for name, agg in summary["discounted_failure_rate"].items() if agg is not None}
         print(f"  failure rate discounted at {config.gamma} per quarter: " + "   ".join(f"{name} {agg['mean']:.4f}" for name, agg in discounted.items()))
         for variant in VARIANTS:
+            if summary[variant].get("all_runs_diverged"):
+                continue
             critic, row = summary[variant]["critic"], summary[variant]
             alpha = row["alpha_at_evaluation"]["mean"] if row["alpha_at_evaluation"] else float("nan")
             versus = row["minus_baseline_paired_by_episode"][REPLANNER]
