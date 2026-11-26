@@ -1,12 +1,12 @@
 """Train occupancy-coupled SAC and standard SAC across seeds and compare them with the baselines.
 
-    python experiments/train_agent.py --tier dev                 # 5 seeds x 2 variants x 2 noise levels, in parallel
-    python experiments/train_agent.py --tier dev --seeds 0 1 --workers 4
-    python experiments/train_agent.py --tier dev --backend modal   # one Modal container per job
-    python experiments/train_agent.py --tier val --platform modal-a --set temperature=fixed alpha=0.1   # one temperature candidate
-    python experiments/train_agent.py --tier val --platform modal-a --checkpoint-every 3000   # also save each agent at 3000, 6000, 9000
-    python experiments/train_agent.py --tier dev --class-sizes 8 5 4 2 1   # 20 drugs in 5 unequal mechanism classes
-    python experiments/train_agent.py --tier test --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
+    python experiments/train_agent.py --tier dev --condition c-given                 # 5 seeds x 2 variants x 2 noise levels, in parallel
+    python experiments/train_agent.py --tier dev --condition no-c --seeds 0 1 --workers 4   # agents not given C
+    python experiments/train_agent.py --tier dev --condition c-given --backend modal   # one Modal container per job
+    python experiments/train_agent.py --tier val --condition c-given --platform modal-a --set temperature=fixed alpha=0.1   # one temperature candidate
+    python experiments/train_agent.py --tier val --condition c-given --platform modal-a --checkpoint-every 3000   # also save each agent at 3000, 6000, 9000
+    python experiments/train_agent.py --tier dev --condition c-given --class-sizes 8 5 4 2 1   # 20 drugs in 5 unequal mechanism classes
+    python experiments/train_agent.py --tier test --condition c-given --seeds 1000 1001 ... --prereg preregistrations/<file>.yaml
 
 Seeds come in three disjoint tiers, read from seeds.yaml: dev for exploration, val for
 choosing hyperparameters, test for the one confirmatory run of a preregistration. A
@@ -28,18 +28,37 @@ hashes, and experiments/verify_checkpoints.py checks any folder against its repo
 Intermediate checkpoints (--checkpoint-every) are for checkpoint choice on val only, at
 most three per agent.
 
+--condition says what the agents are given. "c-given": every drug-indexed block of the
+observation is mapped through the true cross-resistance matrix C, and each drug enters
+the networks as its row of C. "no-c": the observation stays drug-indexed and each drug
+enters as a one-hot vector, so nothing of C reaches the agent's inputs. Either way the
+environment is checked to carry the pending occupancy before anything trains
+(assert_pending_occupancy). Baselines see the environment, not an observation, so they
+are the same in both conditions.
+
 Every launch writes launches/<launch id>.json next to its reports before any job starts,
 so a launch that fails or is killed still leaves a record, and the report carries the
-same id. --platform names the account or machine (required for val and test), and each
-job records its host, its arithmetic and hashes of the agent's weights at
-initialisation, after the first update window and at the end: training is chaotic, so
-runs agree seed by seed only where all of these agree. A launch on the test tier is
-refused unless its preregistration is committed and unmodified, approvals/<preregistration
-name>.ok exists, the code is committed, and no earlier launch used that
-preregistration's test seeds: the rules of the repository's tier guard, enforced here
-so they hold on any machine. The preregistration also names the platform its val
-selection ran on (a `platform:` line), and a test launch from any other platform is
-refused, so selection and test share one arithmetic.
+same id. --platform labels the account or machine (required for val and test); the
+label is recorded but decides nothing. What decides whether two launches share
+arithmetic is the platform fingerprint (platform_fields): the interpreter, CPU, torch
+and numpy builds, the installed distributions, the environment variables that steer
+the kernels, and an arithmetic canary, four short trainings whose final weights a
+different rounding would change. The driver computes it before the launch record is
+written (on Modal, in a probe container), every job computes its own, and each job also
+records its host and hashes of the agent's weights at initialisation, after the first
+update window and at the end: training is chaotic, so runs agree seed by seed only
+where all of these agree. Both agents of a seed must have trained in one process, one
+job after the other, with equal host records; the report lists every pair that did not
+(`pairing_defects`) and the launch then exits 1.
+
+A launch on the test tier is refused unless its preregistration is committed and
+unmodified, approvals/<preregistration name>.ok exists, the code is committed, and no
+earlier launch used that preregistration's test seeds: the rules of the repository's
+tier guard, enforced here so they hold on any machine. The preregistration also carries
+the fingerprint its val selection ran on (a `platform_fingerprint:` line) and the commit
+val ran from (a `val_commit:` line). A test launch is refused unless this platform's
+fingerprint equals it, the training code is unchanged since that commit, and the canary
+is the full one; a test job whose own fingerprint differs from the launch's stops.
 
 The instance is one mechanism class per entry of --class-sizes, each holding that many
 interchangeable drugs; the default, two classes of two, is PairedDrugs. The report
@@ -74,12 +93,24 @@ ENV_KWARGS = dict(expected_reward=True, markov_observation=True, r0_spread=0.04,
 ROOT = Path(__file__).resolve().parents[1]
 TIERS = ("dev", "val", "test")
 DEFAULT_SEEDS = 5  # per variant and noise level when --seeds is not given: the first seeds of the tier
-REPORT_SCHEMA = 2  # 2 adds launch records, the platform label, weight hashes and checkpoints
+REPORT_SCHEMA = 3  # 3 adds the condition, platform fingerprints and pairing checks, and counts runs_learned against the every-quarter replanner with diverged runs counted
 MODAL_ENV = ("MODAL_TASK_ID", "MODAL_REGION", "MODAL_CLOUD_PROVIDER", "MODAL_IMAGE_ID")  # set inside Modal containers
 _jobs_in_process = 0  # jobs this process (a worker, or a reused Modal container) has started
 VARIANTS = {"oc-sac": {"entropy": "pushforward"}, "sac": {"entropy": "action"}}
 PAIRED_DRUGS = (2, 2)  # class sizes of the default instance
 REPLANNER = "oracle[replans every quarter]"  # the planner to compare against under noise, where none is a bound
+CONDITIONS = {"c-given": "mechanism", "no-c": "one_hot"}  # condition -> SACConfig.drug_embedding
+JOB_THREADS = 1  # torch threads every job and the canary train with
+FINGERPRINT_ENV = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_CBWR", "ATEN_CPU_CAPABILITY",
+                   "CUBLAS_WORKSPACE_CONFIG", "PYTHONHASHSEED")  # fmt: skip
+CANARY_ENV = "OCMDP_CANARY"  # "full" unless set; "tiny" keeps the test suite fast, and a test launch refuses it
+CANARY_SIZES = {
+    "full": {"total_quarters": 2_000},
+    "tiny": {"total_quarters": 240, "learning_starts": 48, "batch_size": 32, "hidden_dim": 16, "dual_update_every": 40},
+}
+CANARY_SEED = 0  # the first dev seed; main() checks it lies in the dev tier
+VAL_CODE_PATHS = ("ocmdp", "experiments/train_agent.py", "experiments/stats.py")  # must not change between val and test
+_per_process: dict[tuple[str, int], dict] = {}  # (what, pid) -> value: computed once per process, never inherited by a fork
 
 
 def cross_resistance(class_sizes: tuple[int, ...]) -> tuple[tuple[float, ...], ...]:
@@ -87,14 +118,70 @@ def cross_resistance(class_sizes: tuple[int, ...]) -> tuple[tuple[float, ...], .
     return tuple(tuple(float(j == m) for j in range(len(class_sizes))) for m, size in enumerate(class_sizes) for _ in range(size))
 
 
-def make_env(sigma: float, class_sizes: tuple[int, ...] = PAIRED_DRUGS, delay: int | None = None, lam: float | None = None):
-    """The training environment; delay and lam fall back to ToyConfig's defaults when None."""
+def make_env(sigma: float, class_sizes: tuple[int, ...] = PAIRED_DRUGS, delay: int | None = None, lam: float | None = None,
+             condition: str = "c-given"):  # fmt: skip
+    """The training environment; delay and lam fall back to ToyConfig's defaults when None.
+
+    Under "c-given" every drug-indexed block of the observation is mapped through the true
+    C; under "no-c" the identity map leaves it drug-indexed. The pending occupancy is
+    checked to be in the observation before the environment is returned.
+    """
     from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
     from ocmdp.envs.wrappers import MechanismObservation
 
+    if condition not in CONDITIONS:
+        raise ValueError(f"condition must be one of {sorted(CONDITIONS)}, got {condition!r}")
     coupling = {name: value for name, value in (("delay", delay), ("lam", lam)) if value is not None}
     config = ToyConfig(cross_resistance=cross_resistance(class_sizes), resistance_noise=sigma, **coupling, **ENV_KWARGS)
-    return MechanismObservation(ToyOCMDPEnv(config))
+    toy = ToyOCMDPEnv(config)
+    env = MechanismObservation(toy) if condition == "c-given" else MechanismObservation(toy, mechanism_map=np.eye(toy.coupling.n_drugs))
+    assert_pending_occupancy(env)
+    return env
+
+
+def assert_pending_occupancy(env) -> None:
+    """Raise RuntimeError unless the observation ends with the pending occupancy, the last `delay` quarters of prescribing.
+
+    The kernel sees prescribing only `delay` quarters late, so without that block the
+    observation does not determine the next state. Checked on a copy, over delay + 1
+    quarters with a different drug each quarter: after each, the observation must have the
+    shape the wrapper's map implies, and its trailing block must equal the one-hot shares
+    of the drugs given in the last `delay` quarters, oldest first and front-padded, mapped
+    like every drug-indexed block, and nonzero when delay >= 1. The expected block is built
+    from the drugs given, not from the environment's own record. A RuntimeError rather than
+    an assert, so the check also runs under python -O.
+    """
+    from ocmdp.envs.wrappers import MechanismObservation
+
+    if not isinstance(env, MechanismObservation):
+        raise RuntimeError(f"the training environment must be a MechanismObservation over the toy environment, got {type(env).__name__}")
+    probe = copy.deepcopy(env)
+    toy = probe.unwrapped
+    delay, n_drugs, mapping = toy.config.delay, toy.coupling.n_drugs, probe.mechanism_map
+    width = mapping.shape[1]
+    dim = toy.coupling.n_mechanisms + width + 1 + width * (1 + delay)
+    if not toy.config.markov_observation or probe.observation_space.shape != (dim,):
+        raise RuntimeError(f"the observation must carry the pending occupancy: expected shape ({dim},), got "
+                           f"{probe.observation_space.shape} with markov_observation={toy.config.markov_observation}")  # fmt: skip
+    obs, info = probe.reset(seed=0)
+    given = []  # one drug per quarter, a different one each quarter, so each row of the block is identifiable
+    for q in range(min(delay + 1, toy.config.horizon_quarters - 1)):
+        drug = q % n_drugs
+        while info["quarter"] == q:
+            obs, _, _, _, info = probe.step(drug)
+        given.append(drug)
+        if obs.shape != (dim,):
+            raise RuntimeError(f"the observation has shape {obs.shape}, not ({dim},)")
+        pending = np.zeros((delay, n_drugs))
+        recent = given[-delay:] if delay else []
+        for row, d in enumerate(recent):
+            pending[delay - len(recent) + row, d] = 1.0
+        expected = np.clip(pending.astype(np.float32) @ mapping, 0.0, 1.0).astype(np.float32).ravel()
+        observed = obs[dim - delay * width :]
+        if not np.array_equal(observed, expected):
+            raise RuntimeError(f"after quarter {q + 1}, the trailing block of the observation is not the prescribing of the last {delay} quarters")
+        if delay >= 1 and not observed.any():
+            raise RuntimeError("the pending block of the observation is zero after a quarter of prescribing")
 
 
 def imbalance_kl(class_sizes: tuple[int, ...]) -> float:
@@ -145,42 +232,168 @@ def git_state() -> dict:
         return {"commit": None, "dirty": None, "code_diff_sha256": None, "untracked_code": None}
 
 
-def host(job_in_process: int | None = None) -> dict:
-    """The machine and process a job ran on. Training is chaotic, so results reproduce only where the arithmetic is identical.
-
-    `simd` is the level torch dispatches to, which a pinned environment forces; `cpu` is
-    the model the operating system reports, which a sandboxed container may hide, so the
-    CPU features numpy detects for itself are recorded too. The machine itself is named
-    only by the launch's --platform label: a host name can carry a person's name.
-    `job_in_process` counts the jobs one process or reused container has started, since
-    reuse decides which jobs share arithmetic.
-    """
-    import torch
-
+def _cpu() -> str:
+    """The CPU model the operating system reports, which a sandboxed container may hide."""
     cpu = platform.processor()
     try:
         with open("/proc/cpuinfo") as f:
             cpu = next((line.split(":", 1)[1].strip() for line in f if line.startswith("model name")), cpu)
     except OSError:
         pass
+    return cpu
+
+
+def _numpy_cpu_features() -> list[str] | None:
+    """The CPU features numpy detected for itself and dispatches on."""
     try:
         from numpy._core._multiarray_umath import __cpu_features__
-
-        features = sorted(name for name, enabled in __cpu_features__.items() if enabled)
     except ImportError:
-        features = None
+        return None
+    return sorted(name for name, enabled in __cpu_features__.items() if enabled)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def installed_distributions() -> list[str]:
+    """Every installed distribution as name==version, sorted: the whole environment a run imports from."""
+    from importlib.metadata import distributions
+
+    return sorted({f"{d.metadata['Name']}=={d.version}" for d in distributions()})
+
+
+def arithmetic_canary() -> dict:
+    """Four short trainings whose final weights stand for this process's arithmetic.
+
+    OC-SAC and SAC, in both conditions, on PairedDrugs without noise, from dev seed 0, at
+    a learned temperature so that the entropy and temperature updates run too. Training is
+    chaotic, so two processes whose kernels round differently end with different weights.
+    Computed once per process, under a forked torch generator and at JOB_THREADS threads,
+    so a job's own training is the same with or without it, and not counted as a job.
+    """
+    key = ("canary", os.getpid())
+    if key in _per_process:
+        return _per_process[key]
+    import torch
+
+    from ocmdp.agents.oc_sac import SACConfig, parameter_sha256, train
+
+    size = os.environ.get(CANARY_ENV, "full")
+    if size not in CANARY_SIZES:
+        raise ValueError(f"{CANARY_ENV} must be one of {sorted(CANARY_SIZES)}, got {size!r}")
+    finals = []
+    threads = torch.get_num_threads()
+    torch.set_num_threads(JOB_THREADS)
+    try:
+        with torch.random.fork_rng(devices=[]):
+            for condition, embedding in CONDITIONS.items():
+                for variant in VARIANTS:
+                    cfg = SACConfig(**CANARY_SIZES[size], **VARIANTS[variant], drug_embedding=embedding)
+                    try:
+                        finals.append(parameter_sha256(train(make_env(0.0, PAIRED_DRUGS, condition=condition), cfg, CANARY_SEED).agent))
+                    except FloatingPointError as exc:
+                        finals.append(f"diverged: {exc}")
+    finally:
+        torch.set_num_threads(threads)
+    _per_process[key] = {"size": size, "decisions": CANARY_SIZES[size]["total_quarters"], "sha256": _sha256_text("\n".join(finals))}
+    return _per_process[key]
+
+
+def platform_fields() -> dict:
+    """What decides this process's arithmetic, and `platform_fingerprint`, a SHA-256 over all of it except `platform`.
+
+    `platform`, the operating system's own description, is recorded for reading but not
+    hashed: it changes with updates that leave the arithmetic alone. `torch_threads` is
+    the count jobs train with. Computed once per process.
+    """
+    key = ("platform", os.getpid())
+    if key in _per_process:
+        return _per_process[key]
+    import gymnasium
+    import torch
+
+    fields = {
+        "python": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "cpu": _cpu(),
+        "numpy_cpu_features": _numpy_cpu_features(),
+        "simd": torch.backends.cpu.get_cpu_capability(),
+        "torch": torch.__version__,
+        "torch_git": torch.version.git_version,
+        "torch_cuda": torch.version.cuda,
+        "torch_config_sha256": _sha256_text(torch.__config__.show()),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "torch_threads": JOB_THREADS,
+        "torch_interop_threads": torch.get_num_interop_threads(),
+        "numpy": np.__version__,
+        "numpy_config_sha256": _sha256_text(json.dumps(np.show_config(mode="dicts"), sort_keys=True, default=str)),
+        "gymnasium": gymnasium.__version__,
+        "distributions_sha256": _sha256_text("\n".join(installed_distributions())),
+        "environment": {name: os.environ.get(name) for name in FINGERPRINT_ENV},
+        "arithmetic_canary": arithmetic_canary(),
+    }
+    _per_process[key] = {"platform": platform.platform(), **fields, "platform_fingerprint": _sha256_text(json.dumps(fields, sort_keys=True))}
+    return _per_process[key]
+
+
+def platform_probe(job: tuple = ()) -> dict:
+    """This process's platform fields, for a driver whose jobs run on another backend."""
+    import torch
+
+    torch.set_num_threads(JOB_THREADS)
+    return platform_fields()
+
+
+def host(job_in_process: int | None = None) -> dict:
+    """The machine and process a job ran on. Training is chaotic, so results reproduce only where the arithmetic is identical.
+
+    `simd` is the level torch dispatches to, which a pinned environment forces; `cpu` is
+    the model the operating system reports, which a sandboxed container may hide, so the
+    CPU features numpy detects for itself are recorded too. `fingerprint` is the
+    process's platform_fields. The machine itself is named only by the launch's
+    --platform label: a host name can carry a person's name. `job_in_process` counts the
+    jobs one process or reused container has started, since reuse decides which jobs
+    share arithmetic.
+    """
+    import torch
+
     return {
         "machine": platform.machine(),
-        "cpu": cpu,
+        "cpu": _cpu(),
         "simd": torch.backends.cpu.get_cpu_capability(),
-        "numpy_cpu_features": features,
+        "numpy_cpu_features": _numpy_cpu_features(),
         "torch_threads": torch.get_num_threads(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "cuda_available": torch.cuda.is_available(),
         "pid": os.getpid(),
         "job_in_process": job_in_process,
         "modal": {name: os.environ[name] for name in MODAL_ENV if name in os.environ},
+        "fingerprint": platform_fields(),
     }
+
+
+def pairing_defects(runs: list[dict]) -> list[str]:
+    """Every (noise level, seed) whose two agents did not train in one process, one job after the other, on one host.
+
+    Both runs of a pair must share a pid, have consecutive job counts in VARIANTS order
+    and otherwise equal host records; anything else means the pair may not have shared
+    its arithmetic.
+    """
+    by_pair: dict[tuple, dict[str, dict]] = {}
+    for run in runs:
+        by_pair.setdefault((run["sigma"], run["seed"]), {})[run["variant"]] = run
+    defects = []
+    for (sigma, seed), pair in sorted(by_pair.items()):
+        if set(pair) != set(VARIANTS):
+            defects.append(f"sigma {sigma}, seed {seed}: runs of {sorted(pair)} only")
+            continue
+        first, second = (pair[v]["host"] for v in VARIANTS)
+        if first["pid"] != second["pid"] or second["job_in_process"] != first["job_in_process"] + 1:
+            defects.append(f"sigma {sigma}, seed {seed}: not one process, one job after the other")
+        elif {k: v for k, v in first.items() if k != "job_in_process"} != {k: v for k, v in second.items() if k != "job_in_process"}:
+            defects.append(f"sigma {sigma}, seed {seed}: host records differ")
+    return defects
 
 
 def check_seed_file(parser: argparse.ArgumentParser, tier_name: str, tier: range, seeds_file: Path) -> None:
@@ -207,11 +420,14 @@ def earlier_test_launches(slug: str, out: Path) -> list[str]:
     return found
 
 
-def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git: dict, out: Path, platform_label: str | None) -> str:
+def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git: dict, out: Path, platform_label: str | None,
+                      fingerprinted: bool = False) -> str:  # fmt: skip
     """The preregistration's name, if a launch on the test tier may go ahead; otherwise stop with the reason.
 
     The name is the file's own, read after resolving the path, and a link is refused, so
-    one preregistration's approval cannot be borrowed by another.
+    one preregistration's approval cannot be borrowed by another. With `fingerprinted`
+    the platform is decided by check_test_fingerprint and the label is not compared;
+    otherwise the preregistration's `platform:` line must equal the label.
     """
     if prereg is None or not prereg.is_file():
         parser.error("the test tier needs --prereg pointing at an existing preregistration file")
@@ -219,7 +435,7 @@ def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git:
         parser.error("--prereg must name the preregistration file itself, not a link to it")
     resolved = prereg.resolve()
     try:
-        relative = str(resolved.relative_to(ROOT))
+        relative = resolved.relative_to(ROOT).as_posix()
     except ValueError:
         parser.error(f"--prereg {prereg} must lie inside the repository")
     if resolved.parent != (ROOT / "preregistrations").resolve():
@@ -229,11 +445,12 @@ def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git:
     if not (tracked and unmodified):
         parser.error(f"the test tier needs a committed, unmodified preregistration; {relative} is not")
     slug = resolved.stem
-    named = re.search(r"^platform:\s*(\S+)\s*$", resolved.read_text(encoding="utf-8"), re.M)
-    if named is None:
-        parser.error(f"{relative} must name the platform its val selection ran on, in a `platform:` line")
-    if named.group(1) != platform_label:
-        parser.error(f"{relative} was preregistered for platform {named.group(1)}, not {platform_label}")
+    if not fingerprinted:
+        named = re.search(r"^platform:\s*(\S+)\s*$", resolved.read_text(encoding="utf-8"), re.M)
+        if named is None:
+            parser.error(f"{relative} must name the platform its val selection ran on, in a `platform:` line")
+        if named.group(1) != platform_label:
+            parser.error(f"{relative} was preregistered for platform {named.group(1)}, not {platform_label}")
     if git["dirty"] is not False:
         parser.error("the test tier needs a clean, committed tree, so the report names the exact code that ran")
     used = earlier_test_launches(slug, out)
@@ -244,14 +461,39 @@ def check_test_launch(parser: argparse.ArgumentParser, prereg: Path | None, git:
     return slug
 
 
-def training_jobs(args: argparse.Namespace, overrides: dict, first_episode: int, instance: tuple) -> list[tuple]:
+def check_test_fingerprint(parser: argparse.ArgumentParser, prereg: Path, fields: dict) -> None:
+    """Stop a test launch unless it runs on the platform and the training code its val selection ran on.
+
+    The preregistration names both: a `platform_fingerprint:` line, the fingerprint every
+    job of its val reports carried, and a `val_commit:` line, the commit val ran from.
+    VAL_CODE_PATHS must not differ between that commit and HEAD, and the canary must be
+    the full one.
+    """
+    text = prereg.resolve().read_text(encoding="utf-8")
+    fingerprint = re.search(r"^platform_fingerprint:\s*([0-9a-f]{64})\s*$", text, re.M)
+    commit = re.search(r"^val_commit:\s*([0-9a-f]{7,40})\s*$", text, re.M)
+    if fingerprint is None or commit is None:
+        parser.error(f"{prereg.name} must carry a `platform_fingerprint:` line (64 hex digits) and a `val_commit:` line")
+    if fields["arithmetic_canary"]["size"] != "full":
+        parser.error(f"the test tier needs the full arithmetic canary; {CANARY_ENV} is {fields['arithmetic_canary']['size']!r}")
+    if fields["platform_fingerprint"] != fingerprint.group(1):
+        parser.error(f"this platform's fingerprint {fields['platform_fingerprint']} is not the preregistered {fingerprint.group(1)}")
+    diff = subprocess.run(["git", "diff", "--quiet", commit.group(1), "HEAD", "--", *VAL_CODE_PATHS], cwd=ROOT, capture_output=True)
+    if diff.returncode == 1:
+        parser.error(f"the training code ({', '.join(VAL_CODE_PATHS)}) differs from val_commit {commit.group(1)}")
+    if diff.returncode != 0:
+        parser.error(f"val_commit {commit.group(1)} is not a commit of this repository")
+
+
+def training_jobs(args: argparse.Namespace, overrides: dict, first_episode: int, instance: tuple, fingerprint: str) -> list[tuple]:
     """One train_and_evaluate_pair job per noise level and seed: both agents of a seed in one process or container.
 
     Containers and workers can differ in arithmetic, and training is chaotic, so a pair
-    split across two of them would differ by more than its entropy space.
+    split across two of them would differ by more than its entropy space. Each job carries
+    the launch's fingerprint, and on the test tier a job whose own fingerprint differs stops.
     """
-    return [(s, seed, args.quarters, args.episodes, overrides, first_episode, instance, args.diagnose_gap, args.checkpoint_every)
-            for s in args.sigmas for seed in args.seeds]  # fmt: skip
+    return [(s, seed, args.quarters, args.episodes, overrides, first_episode, instance, args.diagnose_gap, args.checkpoint_every,
+             args.condition, fingerprint, args.tier == "test") for s in args.sigmas for seed in args.seeds]  # fmt: skip
 
 
 def train_and_evaluate_pair(job: tuple) -> list[dict]:
@@ -261,28 +503,53 @@ def train_and_evaluate_pair(job: tuple) -> list[dict]:
 
 
 def launch_arguments(args: argparse.Namespace) -> dict:
-    """The command-line arguments as recorded: paths inside the repository relative to it, so no machine's directories appear."""
+    """The command-line arguments as recorded: paths inside the repository relative to it, so no machine's directories appear.
+
+    Paths are written with forward slashes, so a report reads the same whichever platform wrote it.
+    """
     def recorded(value):
         if isinstance(value, Path):
             resolved = value.resolve()
-            return str(resolved.relative_to(ROOT)) if resolved.is_relative_to(ROOT) else f"<outside the repository>/{value.name}"
+            return resolved.relative_to(ROOT).as_posix() if resolved.is_relative_to(ROOT) else f"<outside the repository>/{value.name}"
         return value
 
     return {k: recorded(v) for k, v in vars(args).items()}
 
 
 def prereg_digest(prereg: Path | None) -> str | None:
-    """SHA-256 of the preregistration, read at launch so the record names the file as it stood when the run began."""
-    return hashlib.sha256(prereg.read_bytes()).hexdigest() if prereg else None
+    """SHA-256 of the preregistration, read at launch so the record names the file as it stood when the run began.
+
+    A preregistration committed and unchanged against HEAD is hashed from its committed blob, so
+    the digest depends on the commit alone and not on how the checkout converted line endings.
+    Any other file (uncommitted, modified, or outside the repository) is hashed from its bytes on disk.
+    """
+    if prereg is None:
+        return None
+    resolved = prereg.resolve()
+    if resolved.is_relative_to(ROOT):
+        relative = resolved.relative_to(ROOT).as_posix()
+        tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "--", relative], cwd=ROOT, capture_output=True).returncode == 0
+        unchanged = tracked and subprocess.run(["git", "diff", "--quiet", "HEAD", "--", relative], cwd=ROOT, capture_output=True).returncode == 0
+        if unchanged:
+            blob = subprocess.run(["git", "cat-file", "blob", f"HEAD:{relative}"], cwd=ROOT, capture_output=True, check=True).stdout
+            return hashlib.sha256(blob).hexdigest()
+    return hashlib.sha256(resolved.read_bytes()).hexdigest()
 
 
-def record_launch(out: Path, launch_id: str, args: dict, git: dict, backend: str, prereg_slug: str | None, prereg_sha256: str | None) -> None:
-    """Write launches/<launch_id>.json before any job starts, so a launch that never finishes still leaves a record."""
+def record_launch(out: Path, launch_id: str, args: dict, git: dict, backend: str, prereg_slug: str | None, prereg_sha256: str | None,
+                  fields: dict | None = None) -> None:  # fmt: skip
+    """Write launches/<launch_id>.json before any job starts, so a launch that never finishes still leaves a record.
+
+    With `fields` (the driver's or the probe's platform_fields) the record also carries
+    them and every distribution installed where the driver runs.
+    """
     folder = out / "launches"
     folder.mkdir(parents=True, exist_ok=True)
     record = {"launch_id": launch_id, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tier": args["tier"], "platform": args["platform"],
               "backend": backend, "prereg_slug": prereg_slug, "prereg_sha256": prereg_sha256, "git": git, "args": args}  # fmt: skip
-    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    if fields is not None:
+        record |= {"platform_fields": fields, "installed_distributions": installed_distributions()}
+    (folder / f"{launch_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8", newline="\n")
 
 
 def _rollouts(env, policy, episodes: int, first_episode: int) -> list:
@@ -511,22 +778,33 @@ def _gap_attribution(agent, snapshots: list, observations: np.ndarray, chosen: n
     }
 
 
-def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, bool, int | None]) -> dict:
-    variant, sigma, seed, total_quarters, episodes, overrides, first_episode, instance, diagnose, checkpoint_every = job
+def train_and_evaluate(job: tuple) -> dict:
+    """One agent trained and evaluated. The job is (variant, sigma, seed, quarters, episodes, overrides, first episode,
+    instance, diagnose, checkpoint_every, condition, the launch's fingerprint, strict).
+
+    With `strict` (the test tier) a job whose platform fingerprint differs from the
+    launch's stops before training; otherwise the mismatch is recorded.
+    """
+    (variant, sigma, seed, total_quarters, episodes, overrides, first_episode, instance, diagnose, checkpoint_every,
+     condition, launch_fingerprint, strict) = job  # fmt: skip
     import torch
 
     from ocmdp.agents.oc_sac import QuarterlyChoicePolicy, SACConfig, checkpoint_bytes, parameter_sha256, train
 
     global _jobs_in_process
     _jobs_in_process += 1
-    torch.set_num_threads(1)
-    env = make_env(sigma, *instance)
-    cfg = SACConfig(**{"total_quarters": total_quarters, **overrides, **VARIANTS[variant]})
+    torch.set_num_threads(JOB_THREADS)
+    own = platform_fields()["platform_fingerprint"]
+    if strict and own != launch_fingerprint:
+        raise RuntimeError(f"this job's platform fingerprint {own} is not the launch's {launch_fingerprint}")
+    env = make_env(sigma, *instance, condition=condition)
+    cfg = SACConfig(**{"total_quarters": total_quarters, **overrides, **VARIANTS[variant], "drug_embedding": CONDITIONS[condition]})
     start = time.time()
     try:
         result = train(env, cfg, seed, checkpoint_every)
     except FloatingPointError as exc:
-        return {"variant": variant, "sigma": sigma, "seed": seed, "host": host(_jobs_in_process), "diverged": str(exc)}
+        return {"variant": variant, "sigma": sigma, "seed": seed, "host": host(_jobs_in_process), "fingerprint_matches_launch": own == launch_fingerprint,
+                "diverged": str(exc), "diverged_at_decision": exc.decisions}  # fmt: skip
     agent = result.agent
     observations, snapshots, chosen = [], [], []  # every quarterly decision of the sampled evaluation, in order
 
@@ -550,6 +828,7 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, b
         "seed": seed,
         "seconds": time.time() - start,
         "host": host(_jobs_in_process),
+        "fingerprint_matches_launch": own == launch_fingerprint,
         "parameter_sha256": {**result.parameter_sha256, "final": parameter_sha256(agent)},
         "learning_curve": [float(np.mean(result.episode_failure[i : i + 25])) for i in range(0, len(result.episode_failure), 25)],
         **_episode_stats(env, logs, cfg.gamma),
@@ -567,13 +846,16 @@ def train_and_evaluate(job: tuple[str, float, int, int, int, dict, int, tuple, b
 
 
 def write_checkpoints(out: Path, tier: str, report_name: str, run: dict) -> list[dict]:
-    """Write a run's checkpoints to out/checkpoints/<tier>/<report_name>/ and return what the report records about each."""
+    """Write a run's checkpoints to out/checkpoints/<tier>/<report_name>/ and return what the report records about each.
+
+    Each path is recorded relative to `out` with forward slashes, so reports from every platform read alike.
+    """
     written = []
     for decisions, blob in run.pop("checkpoints", []):
         relative = Path("checkpoints") / tier / report_name / f"{run['variant']}_sigma{run['sigma']}_seed{run['seed']}_q{decisions}.pt"
         (out / relative).parent.mkdir(parents=True, exist_ok=True)
         (out / relative).write_bytes(blob)
-        written.append({"path": str(relative), "decisions": decisions, "sha256": hashlib.sha256(blob).hexdigest(), "bytes": len(blob)})
+        written.append({"path": relative.as_posix(), "decisions": decisions, "sha256": hashlib.sha256(blob).hexdigest(), "bytes": len(blob)})
     return written
 
 
@@ -662,7 +944,7 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
     from ocmdp.eval.vv import aggregate
 
     base = {name: np.array(stats["expected_failure_rate"]) for name, stats in baselines.items()}
-    uniform, oracle = base["uniform"].mean(), base["oracle"].mean()
+    uniform, oracle, replanner = base["uniform"].mean(), base["oracle"].mean(), base[REPLANNER].mean()
     out = {"baselines": {name: aggregate(rates) for name, rates in base.items()}}
     out["discounted_failure_rate"] = {name: aggregate(stats["discounted_failure_rate"]) for name, stats in baselines.items()}
     per_variant, by_seed = {}, {}
@@ -672,15 +954,18 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
         per_variant[variant] = per_seed
         by_seed[variant] = {r["seed"]: r["expected_failure_rate"] for r in done}
         rates = np.array(list(per_seed.values()))
+        diverged = sum(1 for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" in r)
+        replanner_share = (uniform - rates) / (uniform - replanner)
         out[variant] = {
             "expected_failure_rate": aggregate(rates),
             "iqm_expected_failure_rate": iqm(rates),
             "argmax_expected_failure_rate": aggregate([np.mean(r["argmax"]["expected_failure_rate"]) for r in done]),
-            "share_of_oracle_gain": aggregate((uniform - rates) / (uniform - oracle)),
-            "share_of_replanner_gain": aggregate((uniform - rates) / (uniform - base[REPLANNER].mean())),
-            "runs_learned": int(np.sum(rates < uniform - 0.5 * (uniform - oracle))),  # more than half the oracle's gain over uniform
-            "runs": len(rates),
-            "diverged": sum(1 for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" in r),
+            # the planner bounds the agents only without noise; with noise it is the noise-free planner and the replanner is the reference
+            ("share_of_oracle_gain" if sigma == 0 else "share_of_noise_free_planner_gain"): aggregate((uniform - rates) / (uniform - oracle)),
+            "share_of_replanner_gain": aggregate(replanner_share),
+            "runs_learned": int(np.sum(replanner_share > 0.5)),  # more than half the replanner's gain over uniform; a diverged run has not learned
+            "runs": len(rates) + diverged,  # diverged runs included
+            "diverged": diverged,
             "H_action": float(np.mean([r["H_action"] for r in done])),
             "H_pushforward": float(np.mean([r["H_pushforward"] for r in done])),
             "policy_entropy": {k: float(np.mean([r["policy_entropy"][k] for r in done])) for k in ("action", "within_class")},
@@ -719,8 +1004,9 @@ def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str]) -> dict:
     defaults, overrides = asdict(SACConfig()), {}
     for pair in pairs:
         key, _, value = pair.partition("=")
-        if key == "entropy" or type(defaults.get(key)) not in (int, float, str) or not value:
-            parser.error(f"--set takes KEY=VALUE for a numeric SACConfig field or temperature (entropy is set per variant), got {pair!r}")
+        if key in ("entropy", "drug_embedding") or type(defaults.get(key)) not in (int, float, str) or not value:
+            parser.error(f"--set takes KEY=VALUE for a numeric SACConfig field or temperature (entropy is set per variant and "
+                         f"drug_embedding by --condition), got {pair!r}")  # fmt: skip
         try:
             overrides[key] = type(defaults[key])(value)
         except ValueError:
@@ -736,6 +1022,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier", choices=TIERS, required=True, help="seed tier: fixes the allowed training seeds and the evaluation episodes")
     parser.add_argument("--prereg", type=Path, help="preregistration this run belongs to; required for --tier test")
+    parser.add_argument("--condition", choices=tuple(CONDITIONS), required=True, help="what the agents are given: c-given (C in their inputs) or no-c")
     parser.add_argument("--platform", help="label for the account or machine the jobs run on, not a personal name; required for val and test")
     parser.add_argument("--seeds", type=int, nargs="+", help=f"training seeds inside the tier (default: its first {DEFAULT_SEEDS})")
     parser.add_argument("--seeds-file", type=Path, default=ROOT / "seeds.yaml", help="tier definitions")
@@ -761,6 +1048,8 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     check_seed_file(parser, args.tier, tier, args.seeds_file)
+    if CANARY_SEED not in load_tiers(ROOT / "seeds.yaml")["dev"]:
+        parser.error(f"the arithmetic canary's seed {CANARY_SEED} must lie in the repository's dev tier")
     if args.seeds is None:
         args.seeds = list(tier[:DEFAULT_SEEDS])
     outside = sorted(set(args.seeds) - set(tier))
@@ -778,16 +1067,24 @@ def main() -> int:
         parser.error("--checkpoint-every is for checkpoint choice on val only, in [--quarters / 4, --quarters): at most three per agent")
     overrides = _parse_overrides(parser, args.set)
     git = git_state()  # read at launch: the tree may change while the run is in progress
-    prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform) if args.tier == "test" else None
+    prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform, fingerprinted=True) if args.tier == "test" else None
     if args.tier != "dev" and not args.platform:
         parser.error(f"--tier {args.tier} needs --platform naming the account or machine the jobs run on")
+    if args.backend == "modal":
+        import modal_backend
+
+        (fields,) = modal_backend.run_jobs([("train_agent", "platform_probe", ())])  # one container stands for the platform
+    else:
+        fields = platform_fields()
+    if args.tier == "test":
+        check_test_fingerprint(parser, args.prereg, fields)
     if args.tier == "val" and git["dirty"] is not False:
         print("warning: a val-tier launch from uncommitted code; only code_diff_sha256 identifies what ran", file=sys.stderr)
     launch_id = f"train_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     path = args.out / f"{launch_id}.json"
     launch_args = launch_arguments(args)
     prereg_sha256 = prereg_digest(args.prereg)
-    record_launch(args.out, launch_id, launch_args, git, args.backend, prereg_slug, prereg_sha256)
+    record_launch(args.out, launch_id, launch_args, git, args.backend, prereg_slug, prereg_sha256, fields)
 
     from ocmdp.agents.oc_sac import SACConfig
     from ocmdp.eval.seeds import eval_seed
@@ -795,11 +1092,9 @@ def main() -> int:
     config = SACConfig(**{"total_quarters": args.quarters, **overrides})
     sizes = tuple(args.class_sizes)
     instance = (sizes, args.delay, args.lam)
-    jobs = training_jobs(args, overrides, tier.start, instance)
+    jobs = training_jobs(args, overrides, tier.start, instance, fields["platform_fingerprint"])
     baseline_jobs = [(s, args.episodes, tier.start, instance, config.gamma) for s in args.sigmas]
     if args.backend == "modal":
-        import modal_backend
-
         backend = modal_backend.description()
         calls = [("train_agent", "evaluate_baselines", job) for job in baseline_jobs]
         calls += [("train_agent", "train_and_evaluate_pair", job) for job in jobs]
@@ -823,6 +1118,8 @@ def main() -> int:
         "report_schema": REPORT_SCHEMA,
         "launch_id": launch_id,
         "platform": args.platform,
+        "platform_fingerprint": fields["platform_fingerprint"],
+        "condition": args.condition,
         "prereg_sha256": prereg_sha256,
         "args": launch_args,
         "git": git,
@@ -830,16 +1127,27 @@ def main() -> int:
         "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
         "instance": {k: v for k, v in asdict(toy.config).items() if k != "resistance_noise"},
         "class_structure": {"class_sizes": list(sizes), "imbalance_kl_nats": imbalance_kl(sizes)},
-        "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides, **VARIANTS[v]})) for v in VARIANTS},
+        "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides, **VARIANTS[v], "drug_embedding": CONDITIONS[args.condition]}))
+                       for v in VARIANTS},  # fmt: skip
+        "pairing_defects": pairing_defects(runs),
         "runs": runs,
         "baselines": {str(s): baselines[s] for s in args.sigmas},  # per-episode values, so every contrast can be recomputed
     }
-    report["summary"] = {str(s): summarise(runs, baselines[s], s, args.equivalence_margin) for s in args.sigmas}
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report["summary"] = {}
+    for s in args.sigmas:
+        try:
+            report["summary"][str(s)] = summarise(runs, baselines[s], s, args.equivalence_margin)
+        except ValueError as exc:  # e.g. every run of a variant diverged: the report is still written, with its runs
+            report["summary"][str(s)] = {"not_summarised": str(exc)}
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
 
+    unsummarised = [s for s in args.sigmas if "not_summarised" in report["summary"][str(s)]]
     for sigma in args.sigmas:
         summary = report["summary"][str(sigma)]
-        print(f"\nClass sizes {list(sizes)}, resistance noise {sigma}: expected failure rate on {args.episodes} {args.tier}-tier episodes")
+        if sigma in unsummarised:
+            print(f"\nResistance noise {sigma}: not summarised ({summary['not_summarised']})")
+            continue
+        print(f"\nClass sizes {list(sizes)}, condition {args.condition}, resistance noise {sigma}: expected failure rate on {args.episodes} {args.tier}-tier episodes")
         for name, agg in summary["baselines"].items():
             print(f"  {name:30} {agg['mean']:.4f} ± {agg['ci95']:.4f}")
         for variant in VARIANTS:
@@ -847,7 +1155,7 @@ def main() -> int:
             print(
                 f"  {variant:30} {row['expected_failure_rate']['mean']:.4f} ± {row['expected_failure_rate']['ci95'] or 0:.4f}"
                 f"   argmax {row['argmax_expected_failure_rate']['mean']:.4f}"
-                f"   oracle gain captured {row['share_of_oracle_gain']['mean']:.0%}"
+                f"   replanner gain captured {row['share_of_replanner_gain']['mean']:.0%}"
                 f"   runs learned {row['runs_learned']}/{row['runs']}   diverged {row['diverged']}"
                 f"   H_action {row['H_action']:.3f}  H_pushforward {row['H_pushforward']:.3f}"
                 f"   policy entropy inside classes {row['policy_entropy']['within_class']:.3f}"
@@ -881,7 +1189,10 @@ def main() -> int:
                 f" minus {REPLANNER} {versus['mean']:+.4f} ± {versus['ci95'] or 0:.4f}"
             )
     print(f"\nReport: {path}")
-    return 0
+    if report["pairing_defects"]:
+        print("pairing defects, so these pairs may not share arithmetic:\n  " + "\n  ".join(report["pairing_defects"]), file=sys.stderr)
+        return 1
+    return 1 if unsummarised else 0
 
 
 if __name__ == "__main__":
