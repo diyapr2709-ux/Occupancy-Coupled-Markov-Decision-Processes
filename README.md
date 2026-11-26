@@ -11,11 +11,11 @@ Two properties of this problem class shape the code:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install -r requirements-lock.txt -e ".[dev]"   # the exact versions the logged runs used
 .venv/bin/python -m pytest
 .venv/bin/python experiments/validate.py --quick   # V&V harness, two seeds
 .venv/bin/python experiments/validate.py           # full seed protocol (about 10 minutes)
-.venv/bin/python experiments/train_agent.py --tier dev   # train and compare agents (about 15 minutes on 10 cores)
+.venv/bin/python experiments/train_agent.py --tier dev --condition c-given --platform <label>   # train and compare agents
 .venv/bin/python experiments/planner_restarts.py   # how far the oracle's plan moves with its random starts
 .venv/bin/python experiments/sweep_phase_diagram.py --tier dev   # value of feedback over delay, memory and noise (planning only)
 .venv/bin/python experiments/plot_phase_diagram.py runs/phase/<report>.json   # small-multiples SVG and CSV in figures/
@@ -24,8 +24,10 @@ python3 -m venv .venv
 Training and the phase diagram can run on Modal, one container per job, with `--backend modal` (needs `pip install -e ".[modal]"` and a Modal profile):
 
 ```bash
-.venv/bin/python experiments/train_agent.py --tier dev --backend modal
+.venv/bin/python experiments/train_agent.py --tier dev --condition c-given --platform <label> --backend modal
 ```
+
+On Windows the interpreter is `.venv\Scripts\python`. `--condition` chooses what the agents are given: `c-given` puts the cross-resistance matrix `C` into their observation and drug embeddings, `no-c` gives them drug-indexed observations and one-hot embeddings. `--platform` labels the machine or account the jobs run on; it is required for val and test launches. Each training report records the wall-clock seconds of every agent's training and evaluation (`runs[i].seconds`) and the host it ran on, so compute is read from the report rather than estimated.
 
 ## Layout
 
@@ -102,7 +104,7 @@ Compare policies with `expected_failure_rate`, the mean failure probability of t
 
 ### Results on the toy environments (planners, heuristics and supervised imitation; no reinforcement learning)
 
-Unless a sentence names another report, every rate in this section is an expected failure rate per decision from `runs/vv/vv_20261025_201416_713126_29699.json`. A rate given without an interval is deterministic: it has zero spread over the five protocol seeds. That report records its seeds but not the code version. Its deterministic values reproduce to within 1e-16 in the two later two-seed reports (`runs/vv/vv_20261123_183549_650277_10740.json`, `runs/vv/vv_20261124_122758_669132_5799.json`); the 20-seed noise study and the five-seed imitation study have not been rerun at full size.
+Unless a sentence names another report, every rate in this section is an expected failure rate per decision from `runs/vv/vv_20261025_201416_713126_29699.json`. A rate given without an interval is deterministic: it has zero spread over the five protocol seeds. That report records its seeds but not the code version. Its deterministic values reproduce to within 1e-16 in the two later two-seed reports (uniform mixing samples its drugs, so it is not among them and its mean moves with the seed count) (`runs/vv/vv_20261123_183549_650277_10740.json`, `runs/vv/vv_20261124_122758_669132_5799.json`); the 20-seed noise study and the five-seed imitation study have not been rerun at full size.
 
 - **Without noise, a deterministic rotation trails the replanning oracle by 0.10 expected failures per 1,000-decision episode.**
   - The rotation search finds 13-quarter blocks with a 7-quarter first block. It reaches 0.3467 on both toy environments, against the oracle's 0.3466.
@@ -136,7 +138,18 @@ Unless a sentence names another report, every rate in this section is an expecte
 
 `experiments/train_agent.py` trains OC-SAC (entropy over mechanism classes) and standard SAC (entropy over drugs) on paired seeds. Each agent has one scalar temperature, fixed or learned toward a target inside the entropy range its own policy class can reach.
 
-No trained-agent result is reported yet. All ten reports in `runs/train/` (the latest is `train_20261123_194806_29133.json`) come from earlier versions of the agent, written before its state-dependent temperature was replaced by the current scalar one. They are diagnostics of those versions, and their seeds are not comparable with later runs. Results will appear here after a preregistered comparison has run, with intervals, the interquartile mean and the number of runs that learned.
+No trained-agent result is reported yet. Every report in `runs/train/` is a diagnostic:
+
+- **Before 2026-11-24.** The ten reports up to `train_20261123_194806_29133.json` come from earlier versions of the agent, written before its state-dependent temperature was replaced by the current scalar one. Their seeds are not comparable with later runs.
+- **`train_20261124_155259_10168.json`** is diagnostic only.
+- **The six reports of 2026-11-26** are the dev-tier length check of operations step 1, at fixed temperature 0.
+  - At temperature 0, OC-SAC and SAC train to the same parameters and outcomes by construction. Only the logged entropy diagnostics differ, because each agent measures its own entropy.
+  - They choose a training length and compare nothing. `experiments/check_dev_protocol.py step1` reads them, and `decisions/2026-11-26.md` records its verdict.
+  - Five further launches of that day have launch records under `runs/train/launches/` but no report: the host restarted before they finished, and they were rerun with identical commands.
+- **A contrast that tests nothing.** With equal class sizes, such as (2, 2), and C given, tied drugs receive identical probabilities. Action entropy is then pushforward entropy plus the constant log n.
+  - At equal temperature settings, the two agents seek the same policy. For a given critic their actor gradients agree (`tests/test_oc_sac.py`).
+  - Their critic targets differ by alpha · gamma · log n per transition. That changes the optimiser's path but not its goal.
+  - An OC-SAC against SAC contrast on such an instance is therefore a control. A tie there is expected, not evidence. Identical training is guaranteed only at fixed temperature 0. Results will appear here after a preregistered comparison has run, with intervals, the interquartile mean and the number of runs that learned.
 
 An earlier version of this section compared three entropy targets on validation runs that were never logged. Those numbers are withdrawn.
 
@@ -144,6 +157,13 @@ An earlier version of this section compared three entropy targets on validation 
 
 `ocmdp.eval.seeds.SEEDS = (0, 1, 2, 3, 4)` is the harness protocol. The noise study uses 20 seeds. No file in `decisions/` fixes that count before the run, so the noise study is exploratory.
 - **Tiers.** `seeds.yaml` splits training seeds into three disjoint ranges: dev for exploration, val for choosing hyperparameters, test for the single confirmatory run of a preregistration. `experiments/train_agent.py --tier` rejects seeds outside the tier.
-- **Evaluation episodes follow the tier.** A run is evaluated on episodes `10 000 + first seed of the tier + e`, so val and test episodes are never seen by a dev run. A test-tier run also needs a committed preregistration in `preregistrations/` that names its platform, the owner's approval file, a clean tree, and no earlier test launch of the same preregistration; the scripts refuse it otherwise. They do not stop a different preregistration from reusing test seeds.
+- **Evaluation episodes follow the tier.** A run is evaluated on episodes `10 000 + first seed of the tier + e`, so val and test episodes are never seen by a dev run. The scripts refuse a test-tier training run unless it has all of the following:
+  - a committed, unmodified preregistration in `preregistrations/`, carrying `platform_fingerprint:` and `val_commit:` lines;
+  - the owner's approval file;
+  - a clean tree;
+  - the full arithmetic canary;
+  - a platform fingerprint equal to the preregistered one;
+  - training code unchanged since `val_commit`;
+  - no earlier test launch of the same preregistration. They do not stop a different preregistration from reusing test seeds.
 - **Run reports.** Training and phase reports written by the current scripts record the tier, seeds, evaluation episodes, git state, platform label and instance, and training reports also record each agent's reachable entropy range and temperature. Older training reports lack some of these fields, and none records a platform label. The validation reports under `runs/vv/` record their seeds, but not the tier, git state or evaluation episodes.
 - **Independent streams.** The environment and the policy draw from independent random streams, so every policy faces the same patients and shocks for a given seed.

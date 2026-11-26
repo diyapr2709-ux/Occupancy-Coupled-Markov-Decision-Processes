@@ -1,0 +1,933 @@
+{
+  "seeds": [
+    0,
+    1
+  ],
+  "verification": [
+    {
+      "name": "occupancy_decays_at_lambda",
+      "status": "pass",
+      "detail": "max |mu_0 - lam^n| over 60 periods = 5.6e-17",
+      "values": {
+        "max_error": 5.551115123125783e-17
+      }
+    },
+    {
+      "name": "constraint_filter_never_infeasible",
+      "status": "pass",
+      "detail": "0 infeasible actions over 10 000 random cases and 2 000 environment decisions",
+      "values": {
+        "violations": 0
+      }
+    },
+    {
+      "name": "analytical_two_drug_reproduced",
+      "status": "pass",
+      "detail": "max |simulated - closed form| over p in (1, 0.5, 0.3) = 6.5e-05",
+      "values": {
+        "errors": {
+          "1.0": 1.1879386363489175e-14,
+          "0.5": 3.317212449427398e-05,
+          "0.3": 6.458013582710809e-05
+        }
+      }
+    },
+    {
+      "name": "mean_field_model_matches_env",
+      "status": "pass",
+      "detail": "max discrepancy failure 2.2e-16, resistance 0.0e+00, occupancy 0.0e+00, pending 0.0e+00",
+      "values": {
+        "errors": {
+          "failure": 2.220446049250313e-16,
+          "resistance": 0.0,
+          "occupancy": 0.0,
+          "pending": 0.0
+        }
+      }
+    },
+    {
+      "name": "env_factors_through_pushforward",
+      "status": "pass",
+      "detail": "max difference within a class = 0.0e+00",
+      "values": {}
+    },
+    {
+      "name": "similarity_entropy_generalises_pushforward",
+      "status": "pass",
+      "detail": "H_Z vs cluster form (Z = SS^T): 1.1e-16; vs Shannon (Z = I): 0.0e+00",
+      "values": {}
+    },
+    {
+      "name": "oracle_plan_dominates_heuristic_schedules",
+      "status": "pass",
+      "detail": "mean-field failure rate, oracle vs best heuristic: TwoDrug 0.3467 vs 0.3467; PairedDrugs 0.3467 vs 0.3467",
+      "values": {
+        "TwoDrug": {
+          "oracle": 0.34668919408078,
+          "best_heuristic": 0.3466891939132738
+        },
+        "PairedDrugs": {
+          "oracle": 0.3466891942482862,
+          "best_heuristic": 0.3466891939132738
+        }
+      }
+    }
+  ],
+  "validation": {
+    "ocmdp/TwoDrug-v0": {
+      "fixed[0]": {
+        "failure_rate": {
+          "mean": 0.549,
+          "std": 0.0014142135623730963,
+          "ci95": 0.012706204736174705,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.5317220332851633,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": 17.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "efficacy_reserve": {
+          "mean": 1.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.1646704694398092,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.1646704694398092,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 185.1369738149754,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "cycling[4q]": {
+        "failure_rate": {
+          "mean": 0.39,
+          "std": 0.018384776310850254,
+          "ci95": 0.16518066157027117,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.37955088123510833,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 2.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.6547081759086399,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.6547081759086399,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 32.96582176492041,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "tuned-rotation[13q,first 7q]": {
+        "failure_rate": {
+          "mean": 0.352,
+          "std": 0.01979898987322331,
+          "ci95": 0.17788686630644548,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.3466891939132738,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 2.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.5098118828411953,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.5098118828411953,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 0.10413444308587927,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "uniform": {
+        "failure_rate": {
+          "mean": 0.39749999999999996,
+          "std": 0.02333452377915605,
+          "ci95": 0.20965237814688228,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.38894804428820334,
+          "std": 3.7154976752944914e-05,
+          "ci95": 0.0003338242215684403,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 2.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.6915736364692219,
+          "std": 0.0005499665965955194,
+          "ci95": 0.004941253824969548,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.6915736364692219,
+          "std": 0.0005499665965955194,
+          "ci95": 0.004941253824969548,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 42.36298481801542,
+          "std": 0.03715497675294617,
+          "ci95": 0.33382422156845154,
+          "never": 0
+        }
+      },
+      "oracle": {
+        "failure_rate": {
+          "mean": 0.35450000000000004,
+          "std": 0.01909188309203676,
+          "ci95": 0.17153376393835815,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.3465850594701879,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 2.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.5004639156464394,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.5004639156464394,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      }
+    },
+    "ocmdp/PairedDrugs-v0": {
+      "fixed[0]": {
+        "failure_rate": {
+          "mean": 0.549,
+          "std": 0.0014142135623730963,
+          "ci95": 0.012706204736174705,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.5317220332851633,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": 17.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "efficacy_reserve": {
+          "mean": 2.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.30905060840985793,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.16467046943980915,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 185.1369738149754,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "within-class": {
+        "failure_rate": {
+          "mean": 0.549,
+          "std": 0.0014142135623730963,
+          "ci95": 0.012706204736174705,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.5317220332851633,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": 17.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "efficacy_reserve": {
+          "mean": 2.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.8561404216263375,
+          "std": 0.0005729105143070629,
+          "ci95": 0.0051473967468374585,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.16467046943980918,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 185.1369738149754,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "cross-class": {
+        "failure_rate": {
+          "mean": 0.39749999999999996,
+          "std": 0.02333452377915605,
+          "ci95": 0.20965237814688228,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.38894804428820334,
+          "std": 3.7154976752944914e-05,
+          "ci95": 0.0003338242215684403,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 4.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 0.8561404216263375,
+          "std": 0.0005729105143070629,
+          "ci95": 0.0051473967468374585,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.6915736364692219,
+          "std": 0.0005499665965955194,
+          "ci95": 0.004941253824969548,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 42.36298481801542,
+          "std": 0.03715497675294617,
+          "ci95": 0.33382422156845154,
+          "never": 0
+        }
+      },
+      "cycling[4q]": {
+        "failure_rate": {
+          "mean": 0.3695,
+          "std": 0.009192388155425127,
+          "ci95": 0.08259033078513559,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.36144683693519375,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 4.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 1.140657901594348,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.5720194576457147,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 14.861777465005833,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "tuned-rotation[13q,first 7q]": {
+        "failure_rate": {
+          "mean": 0.352,
+          "std": 0.01979898987322331,
+          "ci95": 0.17788686630644548,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.3466891939132738,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 4.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 1.1999835024816017,
+          "std": 0.0005170393410192064,
+          "ci95": 0.004645414171126229,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.5098118828411953,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 0.10413444308587927,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      },
+      "uniform": {
+        "failure_rate": {
+          "mean": 0.39749999999999996,
+          "std": 0.02333452377915605,
+          "ci95": 0.20965237814688228,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.38894804428820334,
+          "std": 3.7154976752944914e-05,
+          "ci95": 0.0003338242215684403,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 4.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 1.3797891784620941,
+          "std": 0.0010208011553061696,
+          "ci95": 0.009171534497575407,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.6915736364692219,
+          "std": 0.0005499665965955194,
+          "ci95": 0.004941253824969548,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 42.36298481801542,
+          "std": 0.03715497675294617,
+          "ci95": 0.33382422156845154,
+          "never": 0
+        }
+      },
+      "oracle": {
+        "failure_rate": {
+          "mean": 0.35450000000000004,
+          "std": 0.01909188309203676,
+          "ci95": 0.17153376393835815,
+          "never": 0
+        },
+        "expected_failure_rate": {
+          "mean": 0.3465850594701879,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "first_fixation_q": {
+          "mean": null,
+          "std": null,
+          "ci95": null,
+          "never": 2
+        },
+        "efficacy_reserve": {
+          "mean": 4.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "H_action": {
+          "mean": 1.1905615795644322,
+          "std": 0.0006283146167690017,
+          "ci95": 0.005645182857673576,
+          "never": 0
+        },
+        "H_pushforward": {
+          "mean": 0.5004639156464394,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "violation_rate": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        },
+        "regret": {
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0,
+          "never": 0
+        }
+      }
+    }
+  },
+  "lambda_misspecification": {
+    "0.25": {
+      "lam": 0.20000000000000018,
+      "expected_failure_rate": {
+        "mean": 0.3550918589083775,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      }
+    },
+    "0.5": {
+      "lam": 0.6000000000000001,
+      "expected_failure_rate": {
+        "mean": 0.3516592472207102,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      }
+    },
+    "1.0": {
+      "lam": 0.8,
+      "expected_failure_rate": {
+        "mean": 0.3465850594701879,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      }
+    },
+    "2.0": {
+      "lam": 0.9,
+      "expected_failure_rate": {
+        "mean": 0.3487653415648806,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      }
+    },
+    "4.0": {
+      "lam": 0.95,
+      "expected_failure_rate": {
+        "mean": 0.34882601431090937,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      }
+    }
+  },
+  "noise_robustness": {
+    "env": "TwoDrug",
+    "seeds": [
+      0,
+      1
+    ],
+    "0.0": {
+      "uniform": {
+        "mean": 0.38894804428820334,
+        "std": 3.7154976752944914e-05,
+        "ci95": 0.0003338242215684403,
+        "never": 0
+      },
+      "oracle[open-loop]": {
+        "mean": 0.3466891939132738,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      },
+      "oracle[closed-loop]": {
+        "mean": 0.3465850594701879,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      },
+      "replanning_gain": {
+        "mean": 0.00010413444308587927,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      },
+      "gain_over_rotation": {
+        "mean": 0.00010413444308587927,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      },
+      "tuned_rotation": {
+        "mean": 0.3466891939132738,
+        "std": 0.0,
+        "ci95": 0.0,
+        "never": 0
+      }
+    },
+    "0.1": {
+      "uniform": {
+        "mean": 0.39589002522622596,
+        "std": 0.039708976672579485,
+        "ci95": 0.35677100042735294,
+        "never": 0
+      },
+      "oracle[open-loop]": {
+        "mean": 0.36113306492776887,
+        "std": 0.025316134000513094,
+        "ci95": 0.22745643960532871,
+        "never": 0
+      },
+      "oracle[closed-loop]": {
+        "mean": 0.33861367531138226,
+        "std": 0.04275801977684269,
+        "ci95": 0.38416556583314637,
+        "never": 0
+      },
+      "replanning_gain": {
+        "mean": 0.02251938961638661,
+        "std": 0.0174418857763296,
+        "ci95": 0.15670912622781774,
+        "never": 0
+      },
+      "gain_over_rotation": {
+        "mean": 0.02251938961638661,
+        "std": 0.0174418857763296,
+        "ci95": 0.15670912622781774,
+        "never": 0
+      },
+      "tuned_rotation": {
+        "mean": 0.36113306492776887,
+        "std": 0.025316134000513094,
+        "ci95": 0.22745643960532871,
+        "never": 0
+      }
+    },
+    "0.2": {
+      "uniform": {
+        "mean": 0.4025602300422201,
+        "std": 0.08080302122554862,
+        "ci95": 0.7259863420277597,
+        "never": 0
+      },
+      "oracle[open-loop]": {
+        "mean": 0.3692349877819411,
+        "std": 0.06242258651467393,
+        "ci95": 0.5608446881856278,
+        "never": 0
+      },
+      "oracle[closed-loop]": {
+        "mean": 0.32852398167503893,
+        "std": 0.040425771397133436,
+        "ci95": 0.3632111455131556,
+        "never": 0
+      },
+      "replanning_gain": {
+        "mean": 0.04071100610690209,
+        "std": 0.021996815117540498,
+        "ci95": 0.19763354267247232,
+        "never": 0
+      },
+      "gain_over_rotation": {
+        "mean": 0.04071100610690209,
+        "std": 0.021996815117540498,
+        "ci95": 0.19763354267247232,
+        "never": 0
+      },
+      "tuned_rotation": {
+        "mean": 0.3692349877819411,
+        "std": 0.06242258651467393,
+        "ci95": 0.5608446881856278,
+        "never": 0
+      }
+    },
+    "0.4": {
+      "uniform": {
+        "mean": 0.49549469044353533,
+        "std": 0.20741201666037973,
+        "ci95": 1.8635230339662023,
+        "never": 0
+      },
+      "oracle[open-loop]": {
+        "mean": 0.46902069891247017,
+        "std": 0.2609535722061421,
+        "ci95": 2.344574824698675,
+        "never": 0
+      },
+      "oracle[closed-loop]": {
+        "mean": 0.36423397101306276,
+        "std": 0.30474418172361417,
+        "ci95": 2.7380178412662732,
+        "never": 0
+      },
+      "replanning_gain": {
+        "mean": 0.10478672789940739,
+        "std": 0.043790609517472046,
+        "ci95": 0.39344301656759834,
+        "never": 0
+      },
+      "gain_over_rotation": {
+        "mean": 0.10478672789940739,
+        "std": 0.043790609517472046,
+        "ci95": 0.39344301656759834,
+        "never": 0
+      },
+      "tuned_rotation": {
+        "mean": 0.46902069891247017,
+        "std": 0.2609535722061421,
+        "ci95": 2.344574824698675,
+        "never": 0
+      }
+    }
+  },
+  "distillation": {
+    "cloned, drug obs": {
+      "mean": 0.3437921778071473,
+      "std": 0.004089668461185161,
+      "ci95": 0.03674421328819506,
+      "never": 0
+    },
+    "cloned, mechanism obs": {
+      "mean": 0.3460442423260338,
+      "std": 0.0007367781407476893,
+      "ci95": 0.006619688956856787,
+      "never": 0
+    },
+    "DAgger, drug obs": {
+      "mean": 0.3437921778071473,
+      "std": 0.004089668461185161,
+      "ci95": 0.03674421328819506,
+      "never": 0
+    },
+    "DAgger, mechanism obs": {
+      "mean": 0.3460442423260338,
+      "std": 0.0007367781407476893,
+      "ci95": 0.006619688956856787,
+      "never": 0
+    },
+    "uniform": {
+      "mean": 0.3864539279430729,
+      "std": 0.002684628638043847,
+      "ci95": 0.024120431328874307,
+      "never": 0
+    },
+    "oracle": {
+      "mean": 0.3428911110913902,
+      "std": 0.0034463151968525153,
+      "ci95": 0.03096391354295736,
+      "never": 0
+    }
+  },
+  "two_drug_mean_field": {
+    "rho": 0.0,
+    "p_opt": 0.5,
+    "f_opt": 0.5,
+    "f_deterministic": 0.6666666666666666,
+    "gap": 0.16666666666666663
+  }
+}
