@@ -1,0 +1,51 @@
+{
+  "launch_id": "phase_20261126_190606_33244",
+  "started": "2026-11-26T19:06:06-0500",
+  "tier": "dev",
+  "platform": "rtx-1",
+  "backend": "local",
+  "prereg_slug": null,
+  "prereg_sha256": null,
+  "git": {
+    "commit": "d847dc55ad0427a09d274322fa66b7ecb79a1048",
+    "dirty": false,
+    "code_diff_sha256": null,
+    "untracked_code": []
+  },
+  "args": {
+    "tier": "dev",
+    "prereg": null,
+    "platform": "rtx-1",
+    "delays": [
+      0,
+      1,
+      2,
+      4,
+      8
+    ],
+    "lams": [
+      0.0,
+      0.5,
+      0.8,
+      0.95
+    ],
+    "sigmas": [
+      0.0,
+      0.1,
+      0.2,
+      0.4
+    ],
+    "class_sizes": [
+      2,
+      2
+    ],
+    "horizon": 40,
+    "kappa": null,
+    "delta": null,
+    "episodes": 40,
+    "seeds_file": "seeds.yaml",
+    "workers": 30,
+    "backend": "local",
+    "out": "runs/phase"
+  }
+}
