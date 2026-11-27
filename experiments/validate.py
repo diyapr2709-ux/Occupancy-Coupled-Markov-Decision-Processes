@@ -79,7 +79,7 @@ def main() -> int:
     report: dict = {"seeds": list(seeds)}
 
     def save() -> None:  # after every section, so a late crash keeps everything already measured
-        path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
 
     print("Verification")
     checks = run_verification()

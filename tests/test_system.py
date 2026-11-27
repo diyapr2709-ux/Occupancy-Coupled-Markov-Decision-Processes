@@ -234,7 +234,12 @@ def test_validate_cli_writes_a_complete_report(tmp_path):
 
 
 def _train_cli(*args, timeout=300):
-    return subprocess.run([sys.executable, "experiments/train_agent.py", *args], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+    """The training script with the tiny arithmetic canary, and --condition c-given unless the arguments name one."""
+    import os
+
+    condition = [] if "--condition" in args else ["--condition", "c-given"]
+    return subprocess.run([sys.executable, "experiments/train_agent.py", *condition, *args], cwd=ROOT, capture_output=True, text=True,
+                          timeout=timeout, env={**os.environ, "OCMDP_CANARY": "tiny"})  # fmt: skip
 
 
 def _training_script():
@@ -379,49 +384,17 @@ def _protocol():
     return check_dev_protocol
 
 
-def _step1_report(sizes, quarters, rates, same_weights=True, learned=10):
-    """A fixed-temperature-0 report whose agents fail at `rates[seed]` on two episodes; uniform 0.40, replanner 0.30."""
-    runs = []
-    for seed, rate in enumerate(rates):
-        for variant in ("oc-sac", "sac"):
-            final = f"final-{seed}-{quarters}" + ("" if same_weights or variant == "oc-sac" else "-other")
-            runs.append({"variant": variant, "sigma": 0.0, "seed": seed, "expected_failure_rate": [rate, rate],
-                         "parameter_sha256": {"initial": f"init-{seed}", "after_first_window": f"first-{seed}", "final": final}})  # fmt: skip
-    config = {"temperature": "fixed", "alpha": 0.0, "total_quarters": quarters}
-    return {"_path": f"train_{quarters}.json", "class_structure": {"class_sizes": list(sizes)}, "runs": runs,
-            "sac_config": {"oc-sac": config, "sac": config},
-            "baselines": {"0.0": {"uniform": {"expected_failure_rate": [0.40, 0.40]}, "oracle[replans every quarter]": {"expected_failure_rate": [0.30, 0.30]}}},
-            "summary": {"0.0": {"oc-sac": {"runs_learned": learned}}}}  # fmt: skip
-
-
-def test_step1_picks_the_first_converged_length_and_fails_without_one():
-    protocol = _protocol()
-    noise = [0.001 * ((s % 3) - 1) for s in range(10)]
-    flat = {q: [0.32 + n for n in noise] for q in (12_000, 24_000, 48_000)}
-    reports = [_step1_report(sizes, q, flat[q]) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in flat]
-    lines, result = protocol.step1(reports)
-    assert result == {"failed": False, "bitwise": True, "length": 12_000}, lines
-    improving = {12_000: [0.36 + n for n in noise], 24_000: [0.32 + n for n in noise], 48_000: [0.32 + n for n in noise]}
-    reports = [_step1_report(sizes, q, improving[q]) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in improving]
-    assert protocol.step1(reports)[1]["length"] == 24_000  # 12k -> 24k still gains 0.4 of the replanner's share
-    still = {12_000: [0.38 + n for n in noise], 24_000: [0.35 + n for n in noise], 48_000: [0.32 + n for n in noise]}
-    reports = [_step1_report(sizes, q, still[q]) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in still]
-    lines, result = protocol.step1(reports)
-    assert result["failed"] and result["length"] is None and "STOP" in lines[-1]
-    reports = [_step1_report((2, 2), q, flat[q], same_weights=q != 24_000) for q in flat]
-    lines, result = protocol.step1(reports)
-    assert result["failed"] and not result["bitwise"] and "FAIL" in lines[0]
-
-
 def _step2_report(alpha_path, alpha_eval, entropy_last, fixed=None):
     rng = {"floor": 0.0, "maximum": math.log(2), "target": 0.89 * math.log(2)}
     cfg = {"temperature": "fixed" if fixed is not None else "auto", "alpha": fixed or 0.0, "log_alpha_range": [-12.0, 2.0], "total_quarters": 12_000}
-    runs = [{"variant": v, "sigma": 0.0, "seed": 0, "alpha_path": alpha_path, "alpha_at_evaluation": alpha_eval, "entropy_path": [entropy_last],
+    host = {"fingerprint": {"platform_fingerprint": "f" * 64, "arithmetic_canary": {"size": "full"}}}
+    runs = [{"variant": v, "sigma": 0.0, "seed": 0, "host": host, "alpha_path": alpha_path, "alpha_at_evaluation": alpha_eval, "entropy_path": [entropy_last],
              "entropy_range": rng, "policy_entropy": {"action": 0.05 + math.log(2), "within_class": math.log(2)}} for v in ("oc-sac", "sac")]  # fmt: skip
     for run in runs:
         if run["variant"] == "sac":
             run["policy_entropy"] = {"action": 0.05, "within_class": 0.0}
-    return {"_path": "train_dev.json", "class_structure": {"class_sizes": [2, 2]}, "runs": runs, "sac_config": {"oc-sac": cfg, "sac": cfg}}
+    return {"_path": "train_dev.json", "condition": "c-given", "platform_fingerprint": "f" * 64, "class_structure": {"class_sizes": [2, 2]}, "runs": runs,
+            "sac_config": {"oc-sac": cfg, "sac": cfg}}  # fmt: skip
 
 
 def test_step2_holds_learned_temperatures_to_their_clamp_target_and_settling():
@@ -506,25 +479,62 @@ def test_test_tier_checks_refuse_in_order_and_cannot_borrow_an_approval(tmp_path
     (out / "launches" / "train_earlier.json").write_text(json.dumps({"launch_id": "train_earlier", "tier": "test", "prereg_slug": "planned"}), encoding="utf-8")
     assert script.earlier_test_launches("planned", out) == ["train_earlier"]
     assert "already used by launch train_earlier" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
-    link = repo / "preregistrations" / "approved.yaml"
-    link.symlink_to(planned)
-    assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
     planned.write_text("slug: planned, edited after the commit\n", encoding="utf-8")
     assert "committed, unmodified" in _refusal(capsys, script.check_test_launch, planned, clean, out, "test-host")
+    # last, so a skip below drops no other check: a link is refused before the commit state is read
+    link = repo / "preregistrations" / "approved.yaml"
+    try:
+        link.symlink_to(planned)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:  # creating symlinks needs a privilege or Developer Mode on Windows
+            pytest.skip("this Windows account may not create symbolic links (WinError 1314)")
+        raise
+    assert "not a link" in _refusal(capsys, script.check_test_launch, link, clean, out, "test-host")
+
+
+def test_prereg_digest_hashes_the_committed_blob_whatever_the_checkout_did_to_line_endings(tmp_path, monkeypatch):
+    script = _training_script()
+    repo = tmp_path / "repo"
+    (repo / "preregistrations").mkdir(parents=True)
+    committed = b"slug: planned\nplatform: test-host\n"
+    (repo / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    (repo / "preregistrations" / "planned.yaml").write_bytes(committed)
+    for args in (["init", "-q"], ["add", "."], ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "fixture"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setattr(script, "ROOT", repo)
+    planned = repo / "preregistrations" / "planned.yaml"
+    planned.write_bytes(committed.replace(b"\n", b"\r\n"))  # what a CRLF checkout leaves on disk; git sees no change
+    assert script.prereg_digest(planned) == hashlib.sha256(committed).hexdigest()
+    edited = b"slug: planned, edited after the commit\n"
+    planned.write_bytes(edited)
+    assert script.prereg_digest(planned) == hashlib.sha256(edited).hexdigest()  # modified: the bytes on disk
+    draft = repo / "preregistrations" / "draft.yaml"
+    draft.write_bytes(b"slug: draft\r\n")
+    assert script.prereg_digest(draft) == hashlib.sha256(b"slug: draft\r\n").hexdigest()  # untracked: the bytes on disk
+    assert script.prereg_digest(None) is None
 
 
 def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
     script = _training_script()
-    args = SimpleNamespace(quarters=200, episodes=2, diagnose_gap=False, checkpoint_every=None, sigmas=[0.0, 0.2], seeds=[0, 1])
-    assert [(job[0], job[1]) for job in script.training_jobs(args, {}, 0, ((2, 2), None, None))] == [(s, seed) for s in (0.0, 0.2) for seed in (0, 1)]
+    args = SimpleNamespace(quarters=200, episodes=2, diagnose_gap=False, checkpoint_every=None, sigmas=[0.0, 0.2], seeds=[0, 1],
+                           condition="no-c", tier="dev")  # fmt: skip
+    jobs = script.training_jobs(args, {}, 0, ((2, 2), None, None), "fingerprint")
+    assert [(job[0], job[1]) for job in jobs] == [(s, seed) for s in (0.0, 0.2) for seed in (0, 1)]
+    assert all(job[-3:] == ("no-c", "fingerprint", False) for job in jobs)
     calls = []
     original = script.train_and_evaluate
     script.train_and_evaluate = lambda job: calls.append(job[:3]) or {"variant": job[0]}
     try:
-        runs = script.train_and_evaluate_pair((0.2, 7, 200, 2, {}, 0, ((2, 2), None, None), False, None))
+        runs = script.train_and_evaluate_pair((0.2, 7, 200, 2, {}, 0, ((2, 2), None, None), False, None, "c-given", "fingerprint", False))
     finally:
         script.train_and_evaluate = original
     assert calls == [("oc-sac", 0.2, 7), ("sac", 0.2, 7)] and [r["variant"] for r in runs] == ["oc-sac", "sac"]
+
+
+def test_recorded_arguments_use_forward_slashes_inside_the_repository():
+    script = _training_script()
+    recorded = script.launch_arguments(SimpleNamespace(out=ROOT / "runs" / "train", tier="dev"))
+    assert recorded == {"out": "runs/train", "tier": "dev"}
 
 
 def test_train_cli_rejects_overlapping_tiers(tmp_path):
@@ -542,7 +552,11 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     (path,) = tmp_path.glob("train_*.json")
     report = json.loads(path.read_text(encoding="utf-8"))
     assert report["args"]["tier"] == "val" and report["args"]["seeds"] == [100]
-    assert report["report_schema"] == 2 and report["launch_id"] == path.stem and report["platform"] == "test-host"
+    assert report["report_schema"] == 3 and report["launch_id"] == path.stem and report["platform"] == "test-host"
+    assert report["condition"] == "c-given" and report["pairing_defects"] == [] and all(r["fingerprint_matches_launch"] for r in report["runs"])
+    assert {r["host"]["fingerprint"]["platform_fingerprint"] for r in report["runs"]} == {report["platform_fingerprint"]}
+    assert {r["host"]["fingerprint"]["arithmetic_canary"]["size"] for r in report["runs"]} == {"tiny"}
+    assert {c["drug_embedding"] for c in report["sac_config"].values()} == {"mechanism"}
     assert report["args"]["seeds_file"] == "seeds.yaml" and platform.node() not in path.read_text(encoding="utf-8")  # no machine's names or directories
     assert report["args"]["out"] == f"<outside the repository>/{tmp_path.name}"
     sys.path.insert(0, str(ROOT / "experiments"))
@@ -556,7 +570,10 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
     first.write_bytes(intact[:-1] + b"x")
     assert verify_checkpoints.verify(path) == [f"size or SHA-256 differs from the report: {report['runs'][0]['checkpoints'][0]['path']}"]
     first.write_bytes(intact)
-    launch = json.loads((tmp_path / "launches" / f"{path.stem}.json").read_text(encoding="utf-8"))
+    launch_path = tmp_path / "launches" / f"{path.stem}.json"
+    assert b"\r" not in path.read_bytes() and b"\r" not in launch_path.read_bytes()  # the same bytes on every platform
+    launch = json.loads(launch_path.read_text(encoding="utf-8"))
+    assert launch["platform_fields"]["platform_fingerprint"] == report["platform_fingerprint"] and launch["installed_distributions"]
     assert launch["launch_id"] == path.stem and launch["tier"] == "val" and launch["platform"] == "test-host"
     assert launch["git"] == report["git"] and launch["prereg_slug"] is None and launch["prereg_sha256"] is None
     oc_sac, sac = (next(r for r in report["runs"] if r["variant"] == v) for v in ("oc-sac", "sac"))
@@ -646,6 +663,11 @@ def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them
             expected = np.mean([np.mean(np.asarray(r["expected_failure_rate"]) - baseline["expected_failure_rate"]) for r in agent])
             assert versus[name]["mean"] == pytest.approx(expected, abs=1e-12)
     assert set(summary["discounted_failure_rate"]) == set(summary["baselines"]) | {"oc-sac", "sac"}
+    base = report["baselines"]["0.0"]
+    uniform, replanner = np.mean(base["uniform"]["expected_failure_rate"]), np.mean(base["oracle[replans every quarter]"]["expected_failure_rate"])
+    for variant in ("oc-sac", "sac"):
+        shares = [(uniform - np.mean(r["expected_failure_rate"])) / (uniform - replanner) for r in report["runs"] if r["variant"] == variant]
+        assert summary[variant]["runs_learned"] == sum(g > 0.5 for g in shares) and summary[variant]["runs"] == len(shares)
     for run in report["runs"]:
         assert len(run["discounted_failure_rate"]) == len(run["expected_failure_rate"]) == 2 == len(run["final_fail_prob"])
         assert run["critic"]["states"] == 2 * 40 and run["critic"]["actor_choice_regret"] >= -1e-9
@@ -653,7 +675,7 @@ def test_train_cli_builds_unequal_classes_and_logs_the_entropy_spent_inside_them
         assert all(run["entropy_range"]["floor"] - 1e-6 <= h <= run["entropy_range"]["maximum"] + 1e-6 for h in run["entropy_path"])
         assert math.exp(-12.0) * (1 - 1e-6) <= run["alpha_at_evaluation"] <= math.exp(2.0) * (1 + 1e-6)
         assert set(run["host"]) == {"machine", "cpu", "simd", "numpy_cpu_features", "torch_threads", "cuda_visible_devices",
-                                    "cuda_available", "pid", "job_in_process", "modal"}  # fmt: skip
+                                    "cuda_available", "pid", "job_in_process", "modal", "fingerprint"}  # fmt: skip
         assert run["host"]["torch_threads"] == 1 and run["host"]["job_in_process"] >= 1 and run["host"]["numpy_cpu_features"]
         assert set(run["parameter_sha256"]) == {"initial", "after_first_window", "final"}
 
@@ -820,7 +842,8 @@ def _synthetic_phase_report(kappa, crossing_at, constant_sign=None, sigmas=(0.0,
         noise = [0.001 * ((e % 3) - 1) for e in range(episodes)]
         results.append({"delay": 1, "lam": 0.8, "sigma": s, "policy": "greedy", "expected_failure_rate": [0.4] * episodes})
         results.append({"delay": 1, "lam": 0.8, "sigma": s, "policy": "planned-once", "expected_failure_rate": [0.4 + offset + n for n in noise]})
-    return {"instance": {"kappa": kappa, "delta": 0.05, "horizon_quarters": 40}, "results": results}
+    return {"instance": {"kappa": kappa, "delta": 0.05, "horizon_quarters": 40}, "evaluation_episode_seeds": list(range(10_000, 10_000 + episodes)),
+            "results": results}  # fmt: skip
 
 
 def _scorer():

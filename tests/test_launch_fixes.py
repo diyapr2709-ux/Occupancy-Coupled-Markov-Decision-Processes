@@ -1,4 +1,4 @@
-"""Regression tests for the launch guards and the summary fixed after the 26 Nov validation."""
+"""Regression tests for the test-tier launch guards fixed after the 26 Nov validation."""
 
 import argparse
 import json
@@ -24,67 +24,6 @@ def _refusal(capsys, check, *args) -> str:
     with pytest.raises(SystemExit):
         check(argparse.ArgumentParser(), *args)
     return capsys.readouterr().err
-
-
-def _done_run(seed: int, rates: list[float]) -> dict:
-    return {
-        "variant": "oc-sac", "sigma": 0.0, "seed": seed, "expected_failure_rate": rates, "argmax": {"expected_failure_rate": rates},
-        "H_action": 0.5, "H_pushforward": 0.4, "policy_entropy": {"action": 0.5, "within_class": 0.1}, "critic": {}, "gap_attribution": {},
-        "alpha_path": [0.1], "alpha_at_evaluation": 0.1, "discounted_failure_rate": rates, "checkpoints": [],
-    }  # fmt: skip
-
-
-def _diverged_run(seed: int) -> dict:
-    return {"variant": "sac", "sigma": 0.0, "seed": seed, "host": {}, "diverged": "loss is not finite"}
-
-
-def _baselines() -> dict:
-    rates = {"uniform": [0.39, 0.39], "oracle": [0.34, 0.35], "oracle[replans every quarter]": [0.34, 0.35]}
-    return {name: {"expected_failure_rate": r, "discounted_failure_rate": r} for name, r in rates.items()}
-
-
-def test_summary_survives_a_variant_whose_runs_all_diverged():
-    script = _script()
-    runs = [_done_run(0, [0.35, 0.36]), _done_run(1, [0.37, 0.36]), _diverged_run(0), _diverged_run(1)]
-    summary = script.summarise(runs, _baselines(), 0.0)
-    assert summary["sac"] == {"all_runs_diverged": True, "runs": 0, "runs_learned": 0, "diverged": 2}
-    assert summary["discounted_failure_rate"]["sac"] is None and summary["oc-sac"]["runs"] == 2
-    assert summary["oc-sac minus sac (paired by seed)"] is None
-    assert summary["paired comparison"] == {"seeds": [], "not_computed": "no seed has a finished run of both agents"}
-
-
-class _InlinePool:
-    """Stands in for ProcessPoolExecutor, so patched job functions run in this process."""
-
-    def __init__(self, workers):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def submit(self, fn, *args):
-        value = fn(*args)
-        return type("Done", (), {"result": lambda self: value})()
-
-    def map(self, fn, items):
-        return [fn(item) for item in items]
-
-
-def test_a_launch_whose_sac_runs_all_diverged_still_writes_its_report(tmp_path, monkeypatch, capsys):
-    script = _script()
-    monkeypatch.setattr(script, "ProcessPoolExecutor", _InlinePool)
-    monkeypatch.setattr(script, "evaluate_baselines", lambda job: {"sigma": job[0], "baselines": _baselines()})
-    monkeypatch.setattr(script, "train_and_evaluate_pair", lambda job: [_done_run(job[1], [0.35, 0.36]), _diverged_run(job[1])])
-    monkeypatch.setattr(sys, "argv", ["train_agent.py", "--tier", "dev", "--seeds", "0", "1", "--sigmas", "0.0", "--quarters", "200",
-                                      "--episodes", "2", "--set", "learning_starts=64", "batch_size=32", "--out", str(tmp_path)])  # fmt: skip
-    assert script.main() == 0
-    (path,) = tmp_path.glob("train_*.json")
-    report = json.loads(path.read_text(encoding="utf-8"))
-    assert report["summary"]["0.0"]["sac"]["all_runs_diverged"] is True and len(report["runs"]) == 4
-    assert "all 2 runs diverged" in capsys.readouterr().out
 
 
 def test_a_test_launch_writes_only_into_a_folder_directly_under_runs(tmp_path, capsys, monkeypatch):
@@ -154,9 +93,9 @@ def test_main_checks_test_seeds_and_out_once_the_test_tier_checks_pass(tmp_path,
     monkeypatch.setattr(script, "ROOT", tmp_path)
     (tmp_path / "seeds.yaml").write_text((ROOT / "seeds.yaml").read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setattr(script, "git_state", lambda: {"commit": "fixture", "dirty": False, "code_diff_sha256": None, "untracked_code": []})
-    monkeypatch.setattr(script, "check_test_launch", lambda parser, prereg, git, out, platform: "planned")  # stands in for a passed approval
+    monkeypatch.setattr(script, "check_test_launch", lambda parser, prereg, git, out, platform, **kw: "planned")  # stands in for a passed approval
     (tmp_path / "planned.yaml").write_text("seeds: " + " ".join(map(str, TEN)) + "\n", encoding="utf-8")
-    base = ["train_agent.py", "--tier", "test", "--platform", "rtx-1", "--prereg", str(tmp_path / "planned.yaml")]
+    base = ["train_agent.py", "--tier", "test", "--condition", "c-given", "--platform", "rtx-1", "--prereg", str(tmp_path / "planned.yaml")]
     for extra, message in (
         (["--out", str(tmp_path / "runs" / "train")], "explicitly"),
         (["--seeds", *map(str, TEN), "--out", str(tmp_path / "elsewhere")], "directly under runs/"),

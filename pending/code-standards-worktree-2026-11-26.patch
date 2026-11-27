@@ -1,0 +1,629 @@
+diff --git a/experiments/check_dev_protocol.py b/experiments/check_dev_protocol.py
+index 255bc03..595c19e 100644
+--- a/experiments/check_dev_protocol.py
++++ b/experiments/check_dev_protocol.py
+@@ -58,13 +58,14 @@ import argparse
+ import inspect
+ import json
+ import math
++import subprocess
+ import sys
+ from pathlib import Path
+ 
+ import numpy as np
+ 
+ from stats import t_quantile
+-from train_agent import CONDITIONS, REPLANNER, REPORT_SCHEMA, VARIANTS, pairing_defects
++from train_agent import CONDITIONS, REPLANNER, ROOT, VAL_CODE_PATHS, VARIANTS, pairing_defects
+ 
+ INSTANCES = ((2, 2), (8, 5, 4, 2, 1))
+ LENGTHS = (12_000, 24_000, 48_000)
+@@ -75,6 +76,8 @@ CONDITION = "c-given"  # the owner's step-1 condition
+ MIN_PLANNER_SEEDS = 5
+ SPREAD_LIMIT = 0.02  # planner-restart spread, as a share of the gain over uniform
+ BASELINE_TOLERANCE = 1e-12
++FLOOR_TOLERANCE = 1e-4  # share of the entropy range: room for float32 rounding of the measured entropies
++STEP_SCHEMAS = (3, 4)  # step 1's accepted schemas: 4 changes only the summary, which it does not read; step 2 reads only sac_config and runs
+ HASH_STAGES = ("initial", "after_first_window", "final")
+ 
+ 
+@@ -120,8 +123,8 @@ def _step1_cells(reports: list[dict]) -> dict[tuple, dict]:
+     """(instance, length) -> its one report, after checking the six reports are the step-1 design."""
+     cells = {}
+     for report in reports:
+-        if report.get("report_schema") != REPORT_SCHEMA:
+-            raise ValueError(f"{_name(report)} has report schema {report.get('report_schema')}, not {REPORT_SCHEMA}")
++        if report.get("report_schema") not in STEP_SCHEMAS:
++            raise ValueError(f"{_name(report)} has report schema {report.get('report_schema')}, not one of {STEP_SCHEMAS}")
+         if any(report["sac_config"][v]["temperature"] != "fixed" or report["sac_config"][v]["alpha"] != 0.0 for v in VARIANTS):
+             raise ValueError(f"{_name(report)} is not a fixed-temperature-0 launch")
+         if report["args"]["tier"] != "dev" or report["args"]["sigmas"] != [0.0]:
+@@ -346,6 +349,24 @@ def _own_entropy(run: dict, variant: str) -> float:
+     return spent["action"] if variant == "sac" else spent["action"] - spent["within_class"]  # class entropy with tied drugs
+ 
+ 
++def code_state(report: dict) -> tuple | None:
++    """The training code a report ran: the git objects of VAL_CODE_PATHS at its commit, or None when unknown.
++
++    Compared by content, so a commit that adds only run reports or notes leaves it unchanged. A
++    report launched from uncommitted code has no recorded content and gives None.
++    """
++    git = report.get("git") or {}
++    if not git.get("commit") or git.get("dirty") is not False:
++        return None
++    objects = []
++    for path in VAL_CODE_PATHS:
++        found = subprocess.run(["git", "rev-parse", f"{git['commit']}:{path}"], cwd=ROOT, capture_output=True, text=True)
++        if found.returncode != 0:
++            return None
++        objects.append(found.stdout.strip())
++    return tuple(objects)
++
++
+ def step2(reports: list[dict]) -> tuple[list[str], dict]:
+     lines, failed, widen = [], False, False
+     lowest: dict[tuple, float] = {}
+@@ -357,6 +378,11 @@ def step2(reports: list[dict]) -> tuple[list[str], dict]:
+     if any(r["host"]["fingerprint"]["arithmetic_canary"]["size"] != "full" for report in reports for r in report["runs"] if "fingerprint" in r.get("host", {})):
+         lines.append("platform: a job ran with a reduced arithmetic canary -> FAIL")
+         failed = True
++    code = {code_state(report) for report in reports}
++    if len(code) != 1 or None in code:
++        lines.append(f"code: the reports ran {len(code)} versions of the training code ({', '.join(VAL_CODE_PATHS)}), or one from an unknown "
++                     "or uncommitted state, so the step-2 runs and the step-1 runs at L* may differ -> FAIL")  # fmt: skip
++        failed = True
+     for report in reports:
+         if report["condition"] not in CONDITIONS:
+             raise ValueError(f"{_name(report)} has an unknown condition {report['condition']!r}")
+@@ -396,9 +422,10 @@ def step2(reports: list[dict]) -> tuple[list[str], dict]:
+         report = next(r for r in reports if _instance(r) == sizes and r["condition"] == condition and _runs(r, variant))
+         rng = next(iter(_runs(report, variant).values()))["entropy_range"]
+         gap = (reached - rng["floor"]) / (rng["maximum"] - rng["floor"])
+-        ok = gap <= 0.1
+-        lines.append(f"floor: {variant} on {list(sizes)} ({condition}), lowest entropy reached sits {gap:.3f} of the range above the computed floor "
+-                     f"(limit 0.1) -> {'PASS' if ok else 'FAIL'}")  # fmt: skip
++        ok = -FLOOR_TOLERANCE <= gap <= 0.1  # below the floor means the computed floor is wrong
++        where = f"{gap:.3f} of the range above" if gap >= 0 else f"{-gap:.1e} of the range below"
++        lines.append(f"floor: {variant} on {list(sizes)} ({condition}), lowest entropy reached sits {where} the computed floor "
++                     f"(limits {FLOOR_TOLERANCE:.0e} below, 0.1 above) -> {'PASS' if ok else 'FAIL'}")  # fmt: skip
+         failed |= not ok
+     return lines, {"failed": failed, "widen_upward": widen}
+ 
+diff --git a/experiments/modal_backend.py b/experiments/modal_backend.py
+index 9a3bff4..8ec207c 100644
+--- a/experiments/modal_backend.py
++++ b/experiments/modal_backend.py
+@@ -23,12 +23,12 @@ HERE = Path(__file__).resolve().parent
+ SCRIPTS = ("train_agent", "sweep_phase_diagram")
+ PYTHON = ".".join(platform.python_version_tuple()[:2])
+ PINNED = {name: version(name) for name in ("numpy", "torch", "gymnasium")}
+-JOB_TIMEOUT = 4 * 3600  # seconds; a 12 000-quarter training run with its evaluation has taken up to about 15 minutes
++JOB_TIMEOUT = 4 * 3600  # seconds; an upper bound on one training job with its evaluation
+ 
+ # Containers land on different x86 CPUs, and torch and MKL pick SIMD kernels per CPU, which changes
+ # rounding and, in a chaotic training run, the outcome. Both are pinned to their portable paths, but
+ # that does not make containers reproduce each other: numpy's and OpenBLAS's dispatch are not pinned,
+-# and two identical pinned launches trained identically on only 7 of 10 jobs. Seeds are draws.
++# so two identical pinned launches need not train identically. Seeds are draws.
+ ARITHMETIC = {"ATEN_CPU_CAPABILITY": "default", "MKL_CBWR": "COMPATIBLE"}
+ 
+ image = (
+diff --git a/experiments/stats.py b/experiments/stats.py
+index 1adee0a..ae05db8 100644
+--- a/experiments/stats.py
++++ b/experiments/stats.py
+@@ -1,7 +1,6 @@
+ """Student-t quantiles and intervals, standard library only, so every experiment script can use them without scipy.
+ 
+-The evaluation harness's intervals read a 3-decimal t table and fall back to 1.96 above
+-30 degrees of freedom; these are exact to about 1e-9.
++The quantiles are exact to about 1e-9.
+ """
+ 
+ import math
+diff --git a/experiments/train_agent.py b/experiments/train_agent.py
+index 015f712..3e0f3af 100644
+--- a/experiments/train_agent.py
++++ b/experiments/train_agent.py
+@@ -93,13 +93,15 @@ ENV_KWARGS = dict(expected_reward=True, markov_observation=True, r0_spread=0.04,
+ ROOT = Path(__file__).resolve().parents[1]
+ TIERS = ("dev", "val", "test")
+ DEFAULT_SEEDS = 5  # per variant and noise level when --seeds is not given: the first seeds of the tier
+-REPORT_SCHEMA = 3  # 3 adds the condition, platform fingerprints and pairing checks, and counts runs_learned against the every-quarter replanner with diverged runs counted
++REPORT_SCHEMA = 4  # 3 adds the condition, platform fingerprints and pairing checks, and counts runs_learned against the every-quarter replanner with diverged runs counted;
++# 4 imputes diverged runs in every summary statistic of the failure rate, adds per-variant temperature settings, and flags instances whose entropy objectives coincide
+ MODAL_ENV = ("MODAL_TASK_ID", "MODAL_REGION", "MODAL_CLOUD_PROVIDER", "MODAL_IMAGE_ID")  # set inside Modal containers
+ _jobs_in_process = 0  # jobs this process (a worker, or a reused Modal container) has started
+ VARIANTS = {"oc-sac": {"entropy": "pushforward"}, "sac": {"entropy": "action"}}
+ PAIRED_DRUGS = (2, 2)  # class sizes of the default instance
+ REPLANNER = "oracle[replans every quarter]"  # the planner to compare against under noise, where none is a bound
+ CONDITIONS = {"c-given": "mechanism", "no-c": "one_hot"}  # condition -> SACConfig.drug_embedding
++TEMPERATURE_FIELDS = ("temperature", "alpha", "target_fraction")  # the settings each agent may carry on its own, those the candidate set varies
+ JOB_THREADS = 1  # torch threads every job and the canary train with
+ FINGERPRINT_ENV = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_CBWR", "ATEN_CPU_CAPABILITY",
+                    "CUBLAS_WORKSPACE_CONFIG", "PYTHONHASHSEED")  # fmt: skip
+@@ -184,6 +186,27 @@ def assert_pending_occupancy(env) -> None:
+             raise RuntimeError("the pending block of the observation is zero after a quarter of prescribing")
+ 
+ 
++def entropy_objectives_coincide(condition: str, sizes, overrides: dict[str, dict]) -> bool:
++    """Whether OC-SAC's and SAC's objectives differ only by a constant on this instance and these settings.
++
++    With C given, tied drugs receive identical probabilities, so action entropy is pushforward
++    entropy plus sum_c q_c log n_c; with equal class sizes that is the constant log n. At equal
++    temperature settings the two agents then seek the same policy: their actor gradients agree
++    for a given critic, and their critic targets differ by alpha * gamma * log n per non-terminal
++    transition, which changes the optimiser's path but not its goal. A contrast there is a control:
++    a tie is expected, and identical training is guaranteed only at fixed temperature 0. The
++    temperature settings compared are the ones each agent trains with, defaults included.
++    """
++    from ocmdp.agents.oc_sac import SACConfig
++
++    defaults = asdict(SACConfig())
++
++    def temperature(v):
++        return {k: overrides[v].get(k, defaults[k]) for k in TEMPERATURE_FIELDS}
++
++    return condition == "c-given" and len(set(sizes)) == 1 and temperature("oc-sac") == temperature("sac")
++
++
+ def imbalance_kl(class_sizes: tuple[int, ...]) -> float:
+     """KL from the mechanism distribution of a uniform policy over drugs to the uniform one: log M - H(n / K)."""
+     share = np.asarray(class_sizes, dtype=float) / sum(class_sizes)
+@@ -779,8 +802,8 @@ def _gap_attribution(agent, snapshots: list, observations: np.ndarray, chosen: n
+ 
+ 
+ def train_and_evaluate(job: tuple) -> dict:
+-    """One agent trained and evaluated. The job is (variant, sigma, seed, quarters, episodes, overrides, first episode,
+-    instance, diagnose, checkpoint_every, condition, the launch's fingerprint, strict).
++    """One agent trained and evaluated. The job is (variant, sigma, seed, quarters, episodes, overrides by variant,
++    first episode, instance, diagnose, checkpoint_every, condition, the launch's fingerprint, strict).
+ 
+     With `strict` (the test tier) a job whose platform fingerprint differs from the
+     launch's stops before training; otherwise the mismatch is recorded.
+@@ -798,7 +821,7 @@ def train_and_evaluate(job: tuple) -> dict:
+     if strict and own != launch_fingerprint:
+         raise RuntimeError(f"this job's platform fingerprint {own} is not the launch's {launch_fingerprint}")
+     env = make_env(sigma, *instance, condition=condition)
+-    cfg = SACConfig(**{"total_quarters": total_quarters, **overrides, **VARIANTS[variant], "drug_embedding": CONDITIONS[condition]})
++    cfg = SACConfig(**{"total_quarters": total_quarters, **overrides[variant], **VARIANTS[variant], "drug_embedding": CONDITIONS[condition]})
+     start = time.time()
+     try:
+         result = train(env, cfg, seed, checkpoint_every)
+@@ -928,9 +951,9 @@ def two_level_bootstrap_ci95(differences: np.ndarray, resamples: int = 10_000, s
+     Every seed is evaluated on the same episodes, so seeds and episodes are crossed, not
+     nested: each resample draws seeds and episodes independently and keeps the same
+     episodes for every drawn seed, so an effect shared by an episode across seeds keeps
+-    its full weight. Resampling seeds alone treats the evaluation episodes as fixed. Where
+-    seed variance dominates, as in every logged report, a synthetic check put its coverage
+-    at about 0.86 to 0.88 with five seeds, so the t interval over seeds stays primary.
++    its full weight. Resampling seeds alone treats the evaluation episodes as fixed. A
++    percentile bootstrap over five seeds undercovers when seed variance dominates, so the t
++    interval over seeds stays primary.
+     """
+     d = np.asarray(differences, dtype=float)
+     rng = np.random.default_rng(seed)
+@@ -945,27 +968,42 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
+ 
+     base = {name: np.array(stats["expected_failure_rate"]) for name, stats in baselines.items()}
+     uniform, oracle, replanner = base["uniform"].mean(), base["oracle"].mean(), base[REPLANNER].mean()
++    if not uniform - replanner > 0:
++        raise ValueError(f"{REPLANNER} does not fail less than uniform mixing, so no gain share over uniform is defined")
++    if sigma == 0 and not uniform - oracle > 0:
++        raise ValueError("the oracle does not fail less than uniform mixing without noise, so it bounds nothing")
+     out = {"baselines": {name: aggregate(rates) for name, rates in base.items()}}
+     out["discounted_failure_rate"] = {name: aggregate(stats["discounted_failure_rate"]) for name, stats in baselines.items()}
+-    per_variant, by_seed = {}, {}
++    # every run counts. In an agent's own statistics a diverged run takes the failure rate of
++    # uniform mixing or of that agent's worst completed run, whichever is higher: the rule
++    # check_dev_protocol applies to OC-SAC's gain shares, and one that keeps each agent's score
++    # independent of the other agent's runs, as tuning at parity needs. In the paired comparison
++    # the worst completed run is pooled over both agents, so a seed where both diverged differs by 0.
++    at_sigma = [r for r in runs if r["sigma"] == sigma]
++    imputed, completed = {}, {}
+     for variant in VARIANTS:
+-        done = [r for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" not in r]
+-        per_seed = {r["seed"]: np.mean(r["expected_failure_rate"]) for r in done}
+-        per_variant[variant] = per_seed
+-        by_seed[variant] = {r["seed"]: r["expected_failure_rate"] for r in done}
+-        rates = np.array(list(per_seed.values()))
+-        diverged = sum(1 for r in runs if r["variant"] == variant and r["sigma"] == sigma and "diverged" in r)
++        mine = [r for r in at_sigma if r["variant"] == variant]
++        done = [r for r in mine if "diverged" not in r]
++        if not done:
++            raise ValueError(f"every {variant} run diverged, so it has no policy to describe")
++        imputed[variant] = sorted(r["seed"] for r in mine if "diverged" in r)
++        completed[variant] = {r["seed"]: np.asarray(r["expected_failure_rate"]) for r in done}
++        own_worst = max([uniform, *(float(np.mean(v)) for v in completed[variant].values())])
++        rates = np.array([own_worst if "diverged" in r else float(np.mean(r["expected_failure_rate"])) for r in mine])
+         replanner_share = (uniform - rates) / (uniform - replanner)
+         out[variant] = {
++            # the failure rate and its shares count every run, diverged ones imputed; the fields after
++            # "diverged" describe the completed runs, since a diverged run has no policy to measure
+             "expected_failure_rate": aggregate(rates),
+             "iqm_expected_failure_rate": iqm(rates),
+-            "argmax_expected_failure_rate": aggregate([np.mean(r["argmax"]["expected_failure_rate"]) for r in done]),
+             # the planner bounds the agents only without noise; with noise it is the noise-free planner and the replanner is the reference
+-            ("share_of_oracle_gain" if sigma == 0 else "share_of_noise_free_planner_gain"): aggregate((uniform - rates) / (uniform - oracle)),
++            ("share_of_oracle_gain" if sigma == 0 else "share_of_noise_free_planner_gain"):
++                aggregate((uniform - rates) / (uniform - oracle)) if uniform - oracle > 0 else None,
+             "share_of_replanner_gain": aggregate(replanner_share),
+-            "runs_learned": int(np.sum(replanner_share > 0.5)),  # more than half the replanner's gain over uniform; a diverged run has not learned
+-            "runs": len(rates) + diverged,  # diverged runs included
+-            "diverged": diverged,
++            "runs_learned": int(np.sum(replanner_share > 0.5)),  # more than half the replanner's gain over uniform; an imputed run has not learned
++            "runs": len(rates),
++            "diverged": len(imputed[variant]),
++            "argmax_expected_failure_rate": aggregate([np.mean(r["argmax"]["expected_failure_rate"]) for r in done]),
+             "H_action": float(np.mean([r["H_action"] for r in done])),
+             "H_pushforward": float(np.mean([r["H_pushforward"] for r in done])),
+             "policy_entropy": {k: float(np.mean([r["policy_entropy"][k] for r in done])) for k in ("action", "within_class")},
+@@ -978,11 +1016,15 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
+             },
+         }
+         out["discounted_failure_rate"][variant] = aggregate([np.mean(r["discounted_failure_rate"]) for r in done])
+-    shared = sorted(set(per_variant["oc-sac"]) & set(per_variant["sac"]))
++    pooled_worst = max([uniform, *(float(np.mean(v)) for runs_of in completed.values() for v in runs_of.values())])
++    shared = sorted(set.intersection(*({r["seed"] for r in at_sigma if r["variant"] == v} for v in VARIANTS)))
++    by_seed = {v: {s: completed[v].get(s, np.full(len(base["uniform"]), pooled_worst)) for s in shared} for v in VARIANTS}
++    per_variant = {v: {s: float(np.mean(by_seed[v][s])) for s in shared} for v in VARIANTS}
+     diffs = [per_variant["oc-sac"][s] - per_variant["sac"][s] for s in shared]
+     out["oc-sac minus sac (paired by seed)"] = aggregate(diffs)
+     out["paired comparison"] = {
+         "seeds": shared,
++        "diverged_seeds_imputed": imputed,
+         "probability_oc_sac_fails_less": probability_of_improvement([per_variant["oc-sac"][s] for s in shared], [per_variant["sac"][s] for s in shared]),
+         "seeds_where_oc_sac_fails_less": int(np.sum(np.asarray(diffs) < 0)),
+         "bootstrap_ci95_of_mean_difference": bootstrap_ci95(diffs),
+@@ -998,31 +1040,51 @@ def summarise(runs: list[dict], baselines: dict, sigma: float, equivalence_margi
+     return out
+ 
+ 
+-def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str]) -> dict:
++def _parse_overrides(parser: argparse.ArgumentParser, pairs: list[str], flag: str = "--set") -> dict:
+     from ocmdp.agents.oc_sac import SACConfig
+ 
+     defaults, overrides = asdict(SACConfig()), {}
+     for pair in pairs:
+         key, _, value = pair.partition("=")
+         if key in ("entropy", "drug_embedding") or type(defaults.get(key)) not in (int, float, str) or not value:
+-            parser.error(f"--set takes KEY=VALUE for a numeric SACConfig field or temperature (entropy is set per variant and "
++            parser.error(f"{flag} takes KEY=VALUE for a numeric SACConfig field or temperature (entropy is set per variant and "
+                          f"drug_embedding by --condition), got {pair!r}")  # fmt: skip
+         try:
+             overrides[key] = type(defaults[key])(value)
+         except ValueError:
+-            parser.error(f"--set {key} needs a {type(defaults[key]).__name__}, got {value!r}")
++            parser.error(f"{flag} {key} needs a {type(defaults[key]).__name__}, got {value!r}")
+     try:
+         SACConfig(**overrides)
+     except ValueError as exc:
+-        parser.error(f"--set: {exc}")
++        parser.error(f"{flag}: {exc}")
+     return overrides
+ 
+ 
++def variant_overrides(parser: argparse.ArgumentParser, shared: dict, own: dict[str, list[str]]) -> dict[str, dict]:
++    """Each variant's SACConfig overrides: the shared ones, then that variant's own temperature settings.
++
++    A temperature is a per-agent hyperparameter chosen at parity, so each agent of a pair can
++    carry its own while both still train in one job. Only TEMPERATURE_FIELDS may differ
++    between the agents; every other setting is shared.
++    """
++    out = {}
++    for variant in VARIANTS:
++        pairs = own.get(variant) or []
++        extra = _parse_overrides(parser, pairs, f"--set-{variant}")
++        outside = sorted(set(extra) - set(TEMPERATURE_FIELDS))
++        if outside:
++            parser.error(f"--set-{variant} takes only temperature settings ({', '.join(TEMPERATURE_FIELDS)}), got {', '.join(outside)}")
++        out[variant] = {**shared, **extra}  # SACConfig checks each field on its own, so both parts already passed
++    return out
++
++
+ def main() -> int:
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--tier", choices=TIERS, required=True, help="seed tier: fixes the allowed training seeds and the evaluation episodes")
+     parser.add_argument("--prereg", type=Path, help="preregistration this run belongs to; required for --tier test")
+-    parser.add_argument("--condition", choices=tuple(CONDITIONS), required=True, help="what the agents are given: c-given (C in their inputs) or no-c")
++    parser.add_argument("--condition", choices=tuple(CONDITIONS), required=True,
++                        help="what the agents' inputs carry: c-given (C in observation and embeddings) or no-c (drug-indexed, one-hot); "
++                             "OC-SAC's entropy uses C's classes under both")  # fmt: skip
+     parser.add_argument("--platform", help="label for the account or machine the jobs run on, not a personal name; required for val and test")
+     parser.add_argument("--seeds", type=int, nargs="+", help=f"training seeds inside the tier (default: its first {DEFAULT_SEEDS})")
+     parser.add_argument("--seeds-file", type=Path, default=ROOT / "seeds.yaml", help="tier definitions")
+@@ -1037,6 +1099,8 @@ def main() -> int:
+     parser.add_argument("--equivalence-margin", type=float, help="margin of a two one-sided test on the paired difference (none by default)")
+     parser.add_argument("--diagnose-gap", action="store_true", help="attribute each agent's gap to the planner (no noise only; about 3 plans per decision)")
+     parser.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE", help="SACConfig overrides, applied to both variants")
++    parser.add_argument("--set-oc-sac", nargs="*", default=[], metavar="KEY=VALUE", help="OC-SAC's own temperature settings, applied after --set")
++    parser.add_argument("--set-sac", nargs="*", default=[], metavar="KEY=VALUE", help="SAC's own temperature settings, applied after --set")
+     parser.add_argument("--checkpoint-every", type=int, metavar="Q", help="also save each agent every Q training decisions (the final agent is always saved)")
+     parser.add_argument("--out", type=Path, default=Path("runs/train"))
+     args = parser.parse_args()
+@@ -1065,7 +1129,8 @@ def main() -> int:
+         parser.error("--delay must be non-negative and --lam must lie in [0, 1)")
+     if args.checkpoint_every is not None and (args.tier != "val" or not args.quarters / 4 <= args.checkpoint_every < args.quarters):
+         parser.error("--checkpoint-every is for checkpoint choice on val only, in [--quarters / 4, --quarters): at most three per agent")
+-    overrides = _parse_overrides(parser, args.set)
++    shared = _parse_overrides(parser, args.set)
++    overrides = variant_overrides(parser, shared, {"oc-sac": args.set_oc_sac, "sac": args.set_sac})
+     git = git_state()  # read at launch: the tree may change while the run is in progress
+     prereg_slug = check_test_launch(parser, args.prereg, git, args.out, args.platform, fingerprinted=True) if args.tier == "test" else None
+     if args.tier != "dev" and not args.platform:
+@@ -1089,7 +1154,7 @@ def main() -> int:
+     from ocmdp.agents.oc_sac import SACConfig
+     from ocmdp.eval.seeds import eval_seed
+ 
+-    config = SACConfig(**{"total_quarters": args.quarters, **overrides})
++    config = SACConfig(**{"total_quarters": args.quarters, **shared})
+     sizes = tuple(args.class_sizes)
+     instance = (sizes, args.delay, args.lam)
+     jobs = training_jobs(args, overrides, tier.start, instance, fields["platform_fingerprint"])
+@@ -1127,7 +1192,8 @@ def main() -> int:
+         "evaluation_episode_seeds": [eval_seed(tier.start + e) for e in range(args.episodes)],
+         "instance": {k: v for k, v in asdict(toy.config).items() if k != "resistance_noise"},
+         "class_structure": {"class_sizes": list(sizes), "imbalance_kl_nats": imbalance_kl(sizes)},
+-        "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides, **VARIANTS[v], "drug_embedding": CONDITIONS[args.condition]}))
++        "entropy_objectives_coincide": entropy_objectives_coincide(args.condition, sizes, overrides),
++        "sac_config": {v: asdict(SACConfig(**{"total_quarters": args.quarters, **overrides[v], **VARIANTS[v], "drug_embedding": CONDITIONS[args.condition]}))
+                        for v in VARIANTS},  # fmt: skip
+         "pairing_defects": pairing_defects(runs),
+         "runs": runs,
+@@ -1148,6 +1214,8 @@ def main() -> int:
+             print(f"\nResistance noise {sigma}: not summarised ({summary['not_summarised']})")
+             continue
+         print(f"\nClass sizes {list(sizes)}, condition {args.condition}, resistance noise {sigma}: expected failure rate on {args.episodes} {args.tier}-tier episodes")
++        if report["entropy_objectives_coincide"]:
++            print("  control: equal classes with C given and equal temperature settings, so the two entropy objectives differ by a constant; a tie is expected")
+         for name, agg in summary["baselines"].items():
+             print(f"  {name:30} {agg['mean']:.4f} ± {agg['ci95']:.4f}")
+         for variant in VARIANTS:
+diff --git a/tests/test_comparison_reporting.py b/tests/test_comparison_reporting.py
+new file mode 100644
+index 0000000..f919253
+--- /dev/null
++++ b/tests/test_comparison_reporting.py
+@@ -0,0 +1,146 @@
++"""The OC-SAC against SAC summary: every run counted, defined gain shares, per-agent temperatures, and the
++instances where the two entropy objectives differ only by a constant."""
++
++import argparse
++import sys
++from pathlib import Path
++
++import pytest
++import torch
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++@pytest.fixture
++def script():
++    sys.path.insert(0, str(ROOT / "experiments"))
++    try:
++        return __import__("train_agent")
++    finally:
++        sys.path.remove(str(ROOT / "experiments"))
++
++
++def _baselines(uniform=0.40, oracle=0.30, replanner=0.30, episodes=4):
++    def one(rate):
++        return {"expected_failure_rate": [rate] * episodes, "discounted_failure_rate": [rate] * episodes}
++
++    return {"uniform": one(uniform), "oracle": one(oracle), "oracle[replans every quarter]": one(replanner)}
++
++
++def _run(variant, seed, rate, sigma=0.0, episodes=4):
++    return {"variant": variant, "sigma": sigma, "seed": seed, "expected_failure_rate": [rate] * episodes,
++            "discounted_failure_rate": [rate] * episodes, "argmax": {"expected_failure_rate": [rate] * episodes},
++            "H_action": 1.0, "H_pushforward": 0.5, "policy_entropy": {"action": 1.0, "within_class": 0.5},
++            "critic": {}, "gap_attribution": {}, "alpha_path": [], "alpha_at_evaluation": 0.0}  # fmt: skip
++
++
++def _diverged(variant, seed, sigma=0.0):
++    return {"variant": variant, "sigma": sigma, "seed": seed, "diverged": "nan", "diverged_at_decision": 100}
++
++
++def test_a_diverged_run_counts_in_its_agents_statistics_and_in_the_paired_comparison(script):
++    runs = [_diverged("oc-sac", 0), _run("oc-sac", 1, 0.33), _run("oc-sac", 2, 0.34),
++            _run("sac", 0, 0.32), _run("sac", 1, 0.33), _run("sac", 2, 0.45)]  # fmt: skip
++    summary = script.summarise(runs, _baselines(), 0.0)
++    # paired: the worst completed run of either agent, sac's 0.45, which fails more than uniform (0.40)
++    paired = summary["paired comparison"]
++    assert paired["seeds"] == [0, 1, 2] and paired["diverged_seeds_imputed"] == {"oc-sac": [0], "sac": []}
++    assert summary["oc-sac minus sac (paired by seed)"]["mean"] == pytest.approx(((0.45 - 0.32) + 0.0 + (0.34 - 0.45)) / 3)
++    # own statistics: max(uniform, oc-sac's own worst 0.34) = 0.40, whatever sac's runs did
++    oc = summary["oc-sac"]
++    assert oc["expected_failure_rate"]["mean"] == pytest.approx((0.40 + 0.33 + 0.34) / 3)
++    assert oc["share_of_replanner_gain"]["mean"] == pytest.approx(sum((0.40 - a) / 0.10 for a in (0.40, 0.33, 0.34)) / 3)
++    assert (oc["runs"], oc["diverged"], oc["runs_learned"]) == (3, 1, 2)
++    runs[5] = _run("sac", 2, 0.30)
++    assert script.summarise(runs, _baselines(), 0.0)["oc-sac"]["expected_failure_rate"]["mean"] == pytest.approx(oc["expected_failure_rate"]["mean"])
++    own_worse = [_diverged("oc-sac", 0), _run("oc-sac", 1, 0.33), _run("oc-sac", 2, 0.47)] + runs[3:]
++    assert script.summarise(own_worse, _baselines(), 0.0)["oc-sac"]["expected_failure_rate"]["mean"] == pytest.approx((0.47 + 0.33 + 0.47) / 3)
++    assert oc["argmax_expected_failure_rate"]["mean"] == pytest.approx((0.33 + 0.34) / 2)  # completed runs only
++
++
++def test_a_seed_where_both_agents_diverged_gives_a_paired_difference_of_zero(script):
++    runs = [_diverged("oc-sac", 0), _diverged("sac", 0), _run("oc-sac", 1, 0.33), _run("sac", 1, 0.35)]
++    diffs = script.summarise(runs, _baselines(), 0.0)["oc-sac minus sac (paired by seed)"]
++    assert diffs["mean"] == pytest.approx((0.0 + (0.33 - 0.35)) / 2)
++
++
++def test_a_variant_with_every_run_diverged_is_not_summarised(script):
++    # no completed run to describe: the launch reports the noise level as not summarised and exits 1, a stop
++    runs = [_diverged("oc-sac", s) for s in range(2)] + [_run("sac", s, 0.33) for s in range(2)]
++    with pytest.raises(ValueError, match="every oc-sac run diverged"):
++        script.summarise(runs, _baselines(), 0.0)
++
++
++def test_gain_shares_need_a_replanner_that_fails_less_than_uniform(script):
++    runs = [_run(v, 0, 0.35) for v in ("oc-sac", "sac")]
++    with pytest.raises(ValueError, match="does not fail less than uniform"):
++        script.summarise(runs, _baselines(replanner=0.41), 0.0)
++
++
++def test_the_oracle_must_beat_uniform_only_where_it_is_the_bound(script):
++    runs = [_run(v, 0, 0.35) for v in ("oc-sac", "sac")]
++    with pytest.raises(ValueError, match="bounds nothing"):
++        script.summarise(runs, _baselines(oracle=0.41), 0.0)
++    noisy = [_run(v, 0, 0.35, sigma=0.2) for v in ("oc-sac", "sac")]
++    summary = script.summarise(noisy, _baselines(oracle=0.41), 0.2)  # under noise the oracle is only the noise-free planner
++    assert summary["oc-sac"]["share_of_noise_free_planner_gain"] is None
++    assert summary["oc-sac"]["share_of_replanner_gain"]["mean"] == pytest.approx((0.40 - 0.35) / 0.10)
++
++
++def test_each_agent_can_carry_its_own_temperature(script):
++    parser = argparse.ArgumentParser()
++    shared = script._parse_overrides(parser, ["temperature=fixed", "hidden_dim=16"])
++    out = script.variant_overrides(parser, shared, {"oc-sac": ["alpha=0.3"], "sac": ["alpha=0.03"]})
++    assert out == {"oc-sac": {"temperature": "fixed", "hidden_dim": 16, "alpha": 0.3}, "sac": {"temperature": "fixed", "hidden_dim": 16, "alpha": 0.03}}
++    assert script.variant_overrides(parser, shared, {}) == {"oc-sac": shared, "sac": shared}
++
++
++@pytest.mark.parametrize("pair, message", [("hidden_dim=32", "only temperature settings"),
++                                           ("alpha_init=0.5", "only temperature settings"),  # it also sets alpha_lr
++                                           ("target_fraction=2.0", "--set-sac: ")])  # fmt: skip
++def test_only_the_candidate_temperature_settings_may_differ_between_the_agents(script, capsys, pair, message):
++    with pytest.raises(SystemExit):
++        script.variant_overrides(argparse.ArgumentParser(), {}, {"sac": [pair]})
++    assert message in capsys.readouterr().err
++
++
++def test_the_job_trains_each_agent_with_its_own_overrides(script, monkeypatch):
++    seen = {}
++
++    def fake_train(env, cfg, seed, checkpoint_every):
++        seen[cfg.entropy] = cfg.alpha
++        exc = FloatingPointError("stop once the configuration is built")
++        exc.decisions = 0
++        raise exc
++
++    import ocmdp.agents.oc_sac as oc_sac
++
++    threads = torch.get_num_threads()
++    monkeypatch.setattr(script, "_per_process", {})  # this test's tiny canary must not reach later tests
++    monkeypatch.setenv("OCMDP_CANARY", "tiny")
++    script.platform_fields()  # the canary trains with the real train
++    monkeypatch.setattr(oc_sac, "train", fake_train)
++    overrides = {"oc-sac": {"temperature": "fixed", "alpha": 0.3}, "sac": {"temperature": "fixed", "alpha": 0.03}}
++    try:
++        script.train_and_evaluate_pair((0.0, 0, 2_000, 1, overrides, 0, ((2, 2), None, None), False, None, "c-given", "f" * 64, False))
++    finally:
++        torch.set_num_threads(threads)
++    assert seen == {"pushforward": 0.3, "action": 0.03}
++
++
++def test_the_control_flag_compares_the_temperatures_the_agents_train_with(script):
++    # alpha 0 is the default, so an explicit alpha=0 on one agent changes nothing
++    assert script.entropy_objectives_coincide("c-given", (2, 2), {"oc-sac": {"alpha": 0.0}, "sac": {}})
++    assert not script.entropy_objectives_coincide("c-given", (2, 2), {"oc-sac": {"target_fraction": 0.77}, "sac": {}})
++
++
++@pytest.mark.parametrize("condition, sizes, alphas, coincide", [
++    ("c-given", (2, 2), (0.1, 0.1), True),
++    ("c-given", (3, 3, 3), (0.0, 0.0), True),
++    ("c-given", (2, 2), (0.3, 0.03), False),  # different temperatures: different objectives
++    ("c-given", (8, 5, 4, 2, 1), (0.1, 0.1), False),
++    ("no-c", (2, 2), (0.1, 0.1), False),
++])  # fmt: skip
++def test_equal_classes_with_c_given_and_equal_temperatures_are_flagged_as_a_control(script, condition, sizes, alphas, coincide):
++    overrides = {v: {"temperature": "fixed", "alpha": a} for v, a in zip(("oc-sac", "sac"), alphas)}
++    assert script.entropy_objectives_coincide(condition, sizes, overrides) is coincide
+diff --git a/tests/test_system.py b/tests/test_system.py
+index fbcd751..128d55c 100644
+--- a/tests/test_system.py
++++ b/tests/test_system.py
+@@ -384,6 +384,9 @@ def _protocol():
+     return check_dev_protocol
+ 
+ 
++HEAD = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
++
++
+ def _step2_report(alpha_path, alpha_eval, entropy_last, fixed=None):
+     rng = {"floor": 0.0, "maximum": math.log(2), "target": 0.89 * math.log(2)}
+     cfg = {"temperature": "fixed" if fixed is not None else "auto", "alpha": fixed or 0.0, "log_alpha_range": [-12.0, 2.0], "total_quarters": 12_000}
+@@ -393,7 +396,8 @@ def _step2_report(alpha_path, alpha_eval, entropy_last, fixed=None):
+     for run in runs:
+         if run["variant"] == "sac":
+             run["policy_entropy"] = {"action": 0.05, "within_class": 0.0}
+-    return {"_path": "train_dev.json", "condition": "c-given", "platform_fingerprint": "f" * 64, "class_structure": {"class_sizes": [2, 2]}, "runs": runs,
++    return {"_path": "train_dev.json", "condition": "c-given", "platform_fingerprint": "f" * 64, "git": {"commit": HEAD, "dirty": False, "code_diff_sha256": None},
++            "class_structure": {"class_sizes": [2, 2]}, "runs": runs,
+             "sac_config": {"oc-sac": cfg, "sac": cfg}}  # fmt: skip
+ 
+ 
+@@ -410,6 +414,45 @@ def test_step2_holds_learned_temperatures_to_their_clamp_target_and_settling():
+     assert protocol.step2([_step2_report([3.0] * 4, 3.0, 0.0, fixed=3.0)])[1]["widen_upward"]  # class entropy 0.05 < 0.9 log 2
+ 
+ 
++def test_step2_floor_check_fails_when_a_run_reaches_below_the_computed_floor():
++    # a floor computed too high is the bug the check exists for: entropy below it cannot be reached
++    protocol = _protocol()
++    report = _step2_report([0.1] * 4, 0.1, 0.0, fixed=0.1)
++    assert not protocol.step2([report])[1]["failed"]
++    for run in report["runs"]:
++        run["entropy_range"] = {**run["entropy_range"], "floor": 0.06}  # above the 0.05 both runs reached
++    lines, result = protocol.step2([report])
++    assert result["failed"] and any("floor" in line and "below" in line and "FAIL" in line for line in lines)
++    # inside the rounding band below the floor still passes
++    for run in report["runs"]:
++        rng = run["entropy_range"]
++        run["entropy_range"] = {**rng, "floor": 0.05 + 0.5 * protocol.FLOOR_TOLERANCE * (rng["maximum"] - 0.05)}
++    assert not protocol.step2([report])[1]["failed"]
++
++
++def test_step2_needs_every_report_to_have_run_one_version_of_the_training_code(monkeypatch):
++    protocol = _protocol()
++    reports = [_step2_report([0.1] * 4, 0.1, 0.0, fixed=0.1), _step2_report([0.1] * 4, 0.1, 0.0, fixed=0.1)]
++    assert not protocol.step2(reports)[1]["failed"]
++    for git in ({"commit": "d" * 40, "dirty": False, "code_diff_sha256": None},  # not a commit of this repository
++                {"commit": HEAD, "dirty": True, "code_diff_sha256": "e" * 64}):  # uncommitted code: content unknown
++        reports[1]["git"] = git
++        lines, result = protocol.step2(reports)
++        assert result["failed"] and any(line.startswith("code:") for line in lines)
++    # two commits whose training code differs; a commit that only adds reports keeps the same content
++    reports[1]["git"] = {"commit": HEAD, "dirty": False, "code_diff_sha256": None}
++    monkeypatch.setattr(protocol, "code_state", lambda report: (report["_path"],))
++    reports[1]["_path"] = "other.json"
++    assert protocol.step2(reports)[1]["failed"]
++
++
++def test_the_code_state_is_the_training_code_content_at_the_commit():
++    protocol = _protocol()
++    state = protocol.code_state({"git": {"commit": HEAD, "dirty": False}})
++    assert state is not None and len(state) == len(protocol.VAL_CODE_PATHS)
++    assert protocol.code_state({"git": {"commit": HEAD, "dirty": True}}) is None
++
++
+ REPORTS_WITH_A_HOME_PATH = {  # committed before paths were recorded relative to the repository; runs/ is never edited
+     "runs/phase/phase_20261123_184302_13496.json": "d89bc092d7eeed6b3519904eec858530d3d8d4e27158182a61b980fe9e44c345",
+     "runs/phase/phase_20261123_190013_15752.json": "b1bda038b5aaa3bd780265e10f36f3e4836e1cbc8e4c2822048f6785207891fd",
+@@ -518,14 +561,14 @@ def test_training_jobs_keep_both_agents_of_a_seed_in_one_job():
+     script = _training_script()
+     args = SimpleNamespace(quarters=200, episodes=2, diagnose_gap=False, checkpoint_every=None, sigmas=[0.0, 0.2], seeds=[0, 1],
+                            condition="no-c", tier="dev")  # fmt: skip
+-    jobs = script.training_jobs(args, {}, 0, ((2, 2), None, None), "fingerprint")
++    jobs = script.training_jobs(args, {"oc-sac": {}, "sac": {}}, 0, ((2, 2), None, None), "fingerprint")
+     assert [(job[0], job[1]) for job in jobs] == [(s, seed) for s in (0.0, 0.2) for seed in (0, 1)]
+     assert all(job[-3:] == ("no-c", "fingerprint", False) for job in jobs)
+     calls = []
+     original = script.train_and_evaluate
+     script.train_and_evaluate = lambda job: calls.append(job[:3]) or {"variant": job[0]}
+     try:
+-        runs = script.train_and_evaluate_pair((0.2, 7, 200, 2, {}, 0, ((2, 2), None, None), False, None, "c-given", "fingerprint", False))
++        runs = script.train_and_evaluate_pair((0.2, 7, 200, 2, {"oc-sac": {}, "sac": {}}, 0, ((2, 2), None, None), False, None, "c-given", "fingerprint", False))
+     finally:
+         script.train_and_evaluate = original
+     assert calls == [("oc-sac", 0.2, 7), ("sac", 0.2, 7)] and [r["variant"] for r in runs] == ["oc-sac", "sac"]
+@@ -552,7 +595,7 @@ def test_train_cli_writes_a_manifest_on_the_tiers_own_episodes(tmp_path):
+     (path,) = tmp_path.glob("train_*.json")
+     report = json.loads(path.read_text(encoding="utf-8"))
+     assert report["args"]["tier"] == "val" and report["args"]["seeds"] == [100]
+-    assert report["report_schema"] == 3 and report["launch_id"] == path.stem and report["platform"] == "test-host"
++    assert report["report_schema"] == 4 and report["launch_id"] == path.stem and report["platform"] == "test-host"
+     assert report["condition"] == "c-given" and report["pairing_defects"] == [] and all(r["fingerprint_matches_launch"] for r in report["runs"])
+     assert {r["host"]["fingerprint"]["platform_fingerprint"] for r in report["runs"]} == {report["platform_fingerprint"]}
+     assert {r["host"]["fingerprint"]["arithmetic_canary"]["size"] for r in report["runs"]} == {"tiny"}

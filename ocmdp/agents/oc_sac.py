@@ -15,6 +15,11 @@ Relative to standard discrete SAC:
     inert by construction; which temperature each agent uses is tuned at parity;
   - a reserve critic prices the net loss of effective drugs, and enters the actor loss
     weighted by a dual variable xi that ascends on the constraint violation.
+
+Each drug enters the networks through an embedding: its row of the cross-resistance
+matrix C (`drug_embedding="mechanism"`, the default), or a one-hot vector
+(`drug_embedding="one_hot"`), for an agent that is not given C. The drug -> mechanism
+assignment that the pushforward entropy uses is the same either way.
 """
 
 import hashlib
@@ -58,6 +63,7 @@ class SACConfig:
     hidden_dim: int = 128
     reward_scale: float = 10.0  # per-quarter reward is -10 x mean failure probability
     entropy: str = "pushforward"  # or "action"
+    drug_embedding: str = "mechanism"  # "mechanism": each drug's row of C; "one_hot": one-hot, C not given
     temperature: str = "auto"  # "auto": learned towards the target below; "fixed": alpha throughout
     alpha: float = 0.0  # the temperature when fixed, in scaled reward per nat
     target_fraction: float = 0.89  # learned target = floor + target_fraction * (maximum - floor) of the reachable entropy
@@ -73,6 +79,8 @@ class SACConfig:
     def __post_init__(self):
         if self.entropy not in ("pushforward", "action"):
             raise ValueError(f"entropy must be 'pushforward' or 'action', got {self.entropy!r}")
+        if self.drug_embedding not in ("mechanism", "one_hot"):
+            raise ValueError(f"drug_embedding must be 'mechanism' or 'one_hot', got {self.drug_embedding!r}")
         if self.temperature not in ("auto", "fixed"):
             raise ValueError(f"temperature must be 'auto' or 'fixed', got {self.temperature!r}")
         if not (math.isfinite(self.alpha) and self.alpha >= 0 and self.alpha_init > 0 and 0 < self.target_fraction < 1):
@@ -264,9 +272,10 @@ def train(env: gym.Env, cfg: SACConfig, seed: int, checkpoint_every: int | None 
         # without the pending occupancy the critics are fitted to a state that does not determine the next one
         raise ValueError("train needs an environment with markov_observation=True")
     n_mech = toy.coupling.n_mechanisms
+    embeddings = toy.coupling.matrix if cfg.drug_embedding == "mechanism" else np.eye(toy.coupling.n_drugs)
     agent = Agent(
         env.observation_space.shape[0],
-        torch.tensor(toy.coupling.matrix, dtype=torch.float32),
+        torch.tensor(embeddings, dtype=torch.float32),
         torch.tensor(toy.coupling.mechanism_assignment(), dtype=torch.float32),
         n_mech,
         cfg,
@@ -298,7 +307,11 @@ def train(env: gym.Env, cfg: SACConfig, seed: int, checkpoint_every: int | None 
             replay.add(start_obs, chooser.drug, cfg.reward_scale * reward_sum / n, cost, obs, float(done))
             decisions += 1
             if decisions >= cfg.learning_starts:
-                alpha, entropy = _update(agent, actor_opt, critic_opt, alpha_opt, dual, replay.sample(cfg.batch_size, sample_rng))
+                try:
+                    alpha, entropy = _update(agent, actor_opt, critic_opt, alpha_opt, dual, replay.sample(cfg.batch_size, sample_rng))
+                except FloatingPointError as exc:
+                    exc.decisions = decisions  # where it diverged: at a fixed temperature a longer run must diverge at the same decision
+                    raise
                 alphas.append(alpha)
                 entropies.append(entropy)
                 if len(alphas) == cfg.dual_update_every:

@@ -1,4 +1,4 @@
-"""Regressions for the dev-protocol checker, the phase scorer and null, checkpoint verification and the harness's seed gate."""
+"""Regressions for the dev-protocol checker's step 2, the phase scorer and null, checkpoint verification and the harness's seed gate."""
 
 import importlib
 import json
@@ -22,48 +22,6 @@ def _module(name: str):
         sys.path.remove(str(EXPERIMENTS))
 
 
-def _step1_report(sizes, quarters, rate=0.32, commit="abc", seeds=range(10), episodes=(10_000, 10_001)):
-    """A fixed-temperature-0 report: both agents end with the same weights; uniform 0.40, replanner 0.30."""
-    runs = [{"variant": v, "sigma": 0.0, "seed": s, "expected_failure_rate": [rate, rate],
-             "parameter_sha256": {"initial": f"init-{s}", "after_first_window": f"first-{s}", "final": f"final-{s}-{quarters}"}}
-            for s in seeds for v in ("oc-sac", "sac")]  # fmt: skip
-    config = {"temperature": "fixed", "alpha": 0.0, "total_quarters": quarters}
-    return {"_path": f"train_{list(sizes)}_{quarters}.json", "class_structure": {"class_sizes": list(sizes)}, "runs": runs,
-            "git": {"commit": commit, "code_diff_sha256": None}, "evaluation_episode_seeds": list(episodes),
-            "sac_config": {"oc-sac": config, "sac": config},
-            "baselines": {"0.0": {"uniform": {"expected_failure_rate": [0.40, 0.40]}, "oracle[replans every quarter]": {"expected_failure_rate": [0.30, 0.30]}}},
-            "summary": {"0.0": {"oc-sac": {"runs_learned": 10}}}}  # fmt: skip
-
-
-def _six(**overrides):
-    return [_step1_report(sizes, q, **overrides) for sizes in ((2, 2), (8, 5, 4, 2, 1)) for q in (12_000, 24_000, 48_000)]
-
-
-def test_step1_passes_the_full_set():
-    lines, result = _module("check_dev_protocol").step1(_six())
-    assert result == {"failed": False, "bitwise": True, "length": 12_000}, lines
-
-
-def test_step1_fails_a_set_missing_an_instance():
-    reports = [_step1_report((2, 2), q) for q in (12_000, 24_000, 48_000)]
-    lines, result = _module("check_dev_protocol").step1(reports)
-    assert result["failed"] and result["length"] is None
-    assert any("needs exactly" in line for line in lines)
-
-
-def test_step1_refuses_a_duplicate_report():
-    with pytest.raises(ValueError, match="two reports"):
-        _module("check_dev_protocol").step1(_six() + [_step1_report((2, 2), 12_000)])
-
-
-@pytest.mark.parametrize("field, other", [("commit", {"commit": "def"}), ("seeds", {"seeds": range(1, 11)}), ("episodes", {"episodes": (30_000, 30_001)})])
-def test_step1_refuses_reports_from_different_code_seeds_or_episodes(field, other):
-    reports = _six()
-    reports[-1] = _step1_report((8, 5, 4, 2, 1), 48_000, **other)
-    with pytest.raises(ValueError, match="differ in"):
-        _module("check_dev_protocol").step1(reports)
-
-
 def _step2_report(alpha_path, alpha_eval, sizes=(2, 2), fixed=None, sac_entropy=0.05, commit="abc", quarters=12_000, ranges=None):
     ranges = ranges or {"oc-sac": {"floor": 0.0, "maximum": math.log(len(sizes)), "target": 0.89 * math.log(len(sizes))},
                         "sac": {"floor": 0.0, "maximum": math.log(sum(sizes)), "target": 0.89 * math.log(sum(sizes))}}  # fmt: skip
@@ -74,8 +32,12 @@ def _step2_report(alpha_path, alpha_eval, sizes=(2, 2), fixed=None, sac_entropy=
         entropy = {"action": math.log(2), "within_class": math.log(2)} if v == "oc-sac" else {"action": sac_entropy, "within_class": 0.0}
         runs.append({"variant": v, "sigma": 0.0, "seed": 0, "alpha_path": list(alpha_path), "alpha_at_evaluation": alpha_eval,
                      "entropy_path": [ranges[v]["target"]], "entropy_range": ranges[v], "policy_entropy": entropy})  # fmt: skip
-    return {"_path": f"train_{list(sizes)}_{fixed}.json", "class_structure": {"class_sizes": list(sizes)}, "runs": runs,
-            "git": {"commit": commit, "code_diff_sha256": None}, "sac_config": {"oc-sac": cfg, "sac": cfg}}
+    host = {"fingerprint": {"platform_fingerprint": "f" * 64, "arithmetic_canary": {"size": "full"}}}
+    for run in runs:
+        run["host"] = host
+    return {"_path": f"train_{list(sizes)}_{fixed}.json", "condition": "c-given", "platform_fingerprint": "f" * 64,
+            "class_structure": {"class_sizes": list(sizes)}, "runs": runs,
+            "git": {"commit": commit, "code_diff_sha256": None}, "sac_config": {"oc-sac": cfg, "sac": cfg}}  # fmt: skip
 
 
 def test_step2_holds_a_fixed_temperature_stored_as_float32():
@@ -183,3 +145,106 @@ def test_validate_refuses_test_tier_seeds(tmp_path, flags):
 def test_stats_docstring_describes_the_exact_quantiles():
     doc = _module("stats").__doc__
     assert "3-decimal" not in doc and "1.96" not in doc and "_t975" in doc
+
+
+def test_filter_keeps_only_held_out_lines_and_directions(tmp_path):
+    filt = _module("claim_a_filter_predictions")
+    base, held = {"kappa": 0.1, "delta": 0.05, "horizon": 40}, {"kappa": 0.2, "delta": 0.05, "horizon": 40}
+    rows = [{**s, "delay": d, "lam": 0.8, "sigma_star": 0.2, "sign_at_max_sigma": 1} for s in (base, held) for d in (1, 0)]
+    spec = {"contrast": "planned_once_minus_greedy", "sign_beyond_crossing": 1, "lines": rows,
+            "directions": [{"from": base, "to": held, "sign": 1}, {"from": held, "to": held, "sign": 1}]}  # fmt: skip
+    out = filt.filter_predictions(spec, [held])
+    assert [(r["kappa"], r["delay"]) for r in out["lines"]] == [(0.2, 0), (0.2, 1)] and out["directions"] == [{"from": held, "to": held, "sign": 1}]
+    assert out["filtered_from"] == {"lines": 4, "directions": 2}
+    with pytest.raises(ValueError, match="no line at held-out setting"):
+        filt.filter_predictions(spec, [{"kappa": 0.1, "delta": 0.1, "horizon": 40}])
+    src, settings = tmp_path / "p.json", tmp_path / "s.json"
+    src.write_text(json.dumps(spec), encoding="utf-8")
+    settings.write_text(json.dumps({"settings": [held]}), encoding="utf-8")
+    done = subprocess.run([sys.executable, str(EXPERIMENTS / "claim_a_filter_predictions.py"), str(src), str(settings), "--out", str(tmp_path / "f.json")],
+                          capture_output=True, text=True, cwd=ROOT)  # fmt: skip
+    assert done.returncode == 0 and done.stdout.split()[0] == __import__("hashlib").sha256((tmp_path / "f.json").read_bytes()).hexdigest()
+    assert b"\r" not in (tmp_path / "f.json").read_bytes()
+
+
+def test_the_committed_predictions_filter_to_the_forty_held_out_lines():
+    filt, null = _module("claim_a_filter_predictions"), _module("null_phase_predictions")
+    spec = json.loads((ROOT / "predictions/claim-a-2026-11-26/stage2/predictions.json").read_text(encoding="utf-8"))
+    out = filt.filter_predictions(spec, null.load_settings(EXPERIMENTS / "claim_a_heldout_settings.json"))
+    assert len(out["lines"]) == 40 and {(r["kappa"], r["delta"]) for r in out["lines"]} == {(0.2, 0.05), (0.1, 0.1)}
+    assert out["directions"] == []  # the one direction check starts at the dev setting, which the test does not measure
+
+
+def test_scorer_refuses_a_report_without_evaluation_episodes():
+    scorer = _module("score_phase_predictions")
+    report = _phase_report({(1, 0.8): 0.2})
+    del report["evaluation_episode_seeds"]
+    with pytest.raises(ValueError, match="evaluation_episode_seeds missing"):
+        scorer.measured_lines([report], "planned_once_minus_greedy")
+
+
+def _dev_map(spreads=(0.02, 0.03), zero_line=False):
+    """A two-line dev map: per-episode contrasts with the given SDs; optionally a line whose contrast is 0 everywhere."""
+    rng = np.random.default_rng(0)
+    results = []
+    for line, sd in enumerate(spreads):
+        for s in (0.0, 0.1, 0.2, 0.4):
+            greedy = [0.4] * 40
+            planned = [0.4 + (s - 0.15) + rng.normal(0, sd) for _ in range(40)] if not (zero_line and line == 0) else greedy
+            results.append({"delay": line, "lam": 0.8, "sigma": s, "policy": "greedy", "expected_failure_rate": greedy})
+            results.append({"delay": line, "lam": 0.8, "sigma": s, "policy": "planned-once", "expected_failure_rate": planned})
+    return {"args": {"tier": "dev"}, "instance": {"kappa": 0.1, "delta": 0.05, "horizon_quarters": 40},
+            "evaluation_episode_seeds": list(range(10_000, 10_040)), "results": results}  # fmt: skip
+
+
+def test_episode_count_follows_the_largest_spread_within_the_floor_and_cap():
+    count = _module("claim_a_episode_count")
+    stats = _module("stats")
+    assert count.episode_count(_dev_map((0.001, 0.002))) == 40  # tiny spreads: the floor
+    assert count.episode_count(_dev_map((0.02, 0.2))) == 100  # one wide cell: the cap binds
+    n = count.episode_count(_dev_map((0.02, 0.02)))
+    assert 40 < n < 100 and stats.t_quantile(0.975, n - 1) * 0.02 / math.sqrt(n) <= 0.005 * 1.6  # at the spread's own scale
+    with pytest.raises(ValueError, match="zero contrast at every sigma"):
+        count.episode_count(_dev_map(zero_line=True))
+
+
+def test_gate_pins_recompute_from_the_committed_files():
+    gate = _module("claim_a_gate")
+    for name in ("kappa", "delta"):
+        prereg = ROOT / "preregistrations" / f"2026-11-27-claim-a-boundary-{name}.yaml"
+        pins = gate.read_pins(prereg)
+        computed = gate.computed_pins(ROOT / pins["dev_map"], ROOT / pins["heldout_settings"], ROOT / pins["predictions"], int(pins["sign_beyond_crossing"]))
+        assert {k: pins[k] for k in computed} == computed, name
+
+
+def test_gate_refuses_a_preregistration_with_a_missing_or_doubled_pin(tmp_path):
+    gate = _module("claim_a_gate")
+    text = (ROOT / "preregistrations" / "2026-11-27-claim-a-boundary-kappa.yaml").read_text(encoding="utf-8")
+    broken = tmp_path / "x.yaml"
+    broken.write_text(text.replace("\nseed: 0\n", "\n"), encoding="utf-8")
+    with pytest.raises(ValueError, match="lacks the pins"):
+        gate.read_pins(broken)
+    broken.write_text(text + "\nseed: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="twice"):
+        gate.read_pins(broken)
+
+
+def test_scorer_verdict_against_the_null_fails_the_null_itself_and_refuses_a_mismatched_null(tmp_path):
+    scorer = _module("score_phase_predictions")
+    report = _phase_report({(0, 0.8): 0.2, (1, 0.8): 0.25})
+    lines, episodes = scorer.measured_lines([report], "planned_once_minus_greedy")
+    null = {(0.1, 0.05, 40, d, 0.8): (0.2, 1) for d in (0, 1)}
+    out = scorer.score(lines, episodes, null, null, [], 1, math.log(math.sqrt(2)), 200, 0)
+    assert out["E_minus_E_null_ci95"] == [0.0, 0.0] and out["verdict_vs_null"] == "fail"
+    better = {(0.1, 0.05, 40, 0, 0.8): (0.2, 1), (0.1, 0.05, 40, 1, 0.8): (0.25, 1)}
+    worse = {(0.1, 0.05, 40, 0, 0.8): (0.4, 1), (0.1, 0.05, 40, 1, 0.8): (0.4, 1)}
+    assert scorer.score(lines, episodes, better, worse, [], 1, math.log(math.sqrt(2)), 200, 0)["verdict_vs_null"] == "pass"
+    theory, other = tmp_path / "t.json", tmp_path / "n.json"
+    rows = [{"kappa": 0.1, "delta": 0.05, "horizon": 40, "delay": d, "lam": 0.8, "sigma_star": 0.2, "sign_at_max_sigma": 1} for d in (0, 1)]
+    theory.write_text(json.dumps({"contrast": "planned_once_minus_greedy", "sign_beyond_crossing": 1, "lines": rows}), encoding="utf-8")
+    other.write_text(json.dumps({"contrast": "planned_once_minus_greedy", "sign_beyond_crossing": -1, "lines": rows}), encoding="utf-8")
+    rep = tmp_path / "r.json"
+    rep.write_text(json.dumps(report), encoding="utf-8")
+    done = subprocess.run([sys.executable, str(EXPERIMENTS / "score_phase_predictions.py"), str(theory), str(rep), "--null", str(other), "--resamples", "20"],
+                          capture_output=True, text=True, cwd=ROOT)  # fmt: skip
+    assert done.returncode == 2 and "--null predicts" in done.stderr

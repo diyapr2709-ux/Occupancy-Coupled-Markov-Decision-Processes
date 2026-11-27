@@ -2,6 +2,7 @@
 
     python experiments/planner_restarts.py                                    # 5 mechanisms x 4 drugs
     python experiments/planner_restarts.py --mechanisms 2 --drugs-per-mechanism 2
+    python experiments/planner_restarts.py --class-sizes 8 5 4 2 1          # unequal classes, as the training instances build them
     python experiments/planner_restarts.py --steps 800 --random-starts 16
 
 The oracle's plan is the best iterate of a non-convex optimisation from a handful of
@@ -21,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from train_agent import git_state
+from train_agent import cross_resistance, git_state
 
 from ocmdp.baselines.oracle import FullInformationOracle, best_rotation
 from ocmdp.envs.toy import ToyConfig, ToyOCMDPEnv
@@ -43,6 +44,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mechanisms", type=int, default=5)
     parser.add_argument("--drugs-per-mechanism", type=int, default=4)
+    parser.add_argument("--class-sizes", type=int, nargs="+", metavar="N", help="drugs per mechanism class, in place of the two options above")
     parser.add_argument("--steps", type=int, default=200, help="planner iterations (the oracle's default is 200)")
     parser.add_argument("--random-starts", type=int, default=4, help="random planner starts (the oracle's default is 4)")
     parser.add_argument("--planner-seeds", type=int, default=5)
@@ -50,11 +52,16 @@ def main() -> int:
     args = parser.parse_args()
     if min(args.mechanisms, args.drugs_per_mechanism, args.steps, args.planner_seeds) < 1 or args.random_starts < 0:
         parser.error("counts must be positive (--random-starts may be zero)")
+    if args.class_sizes is not None and (len(args.class_sizes) < 2 or min(args.class_sizes) < 1):
+        parser.error("--class-sizes needs at least two classes of at least one drug each")
     if args.out.exists() and not args.out.is_dir():
         parser.error(f"--out {args.out} exists and is not a directory")
     args.out.mkdir(parents=True, exist_ok=True)
 
-    config = ToyConfig.paired(n_mechanisms=args.mechanisms, drugs_per_mechanism=args.drugs_per_mechanism)
+    if args.class_sizes is None:
+        config = ToyConfig.paired(n_mechanisms=args.mechanisms, drugs_per_mechanism=args.drugs_per_mechanism)
+    else:  # the training instance's C, with ToyConfig's default dynamics as make_env uses them, from the nominal start
+        config = ToyConfig(cross_resistance=cross_resistance(tuple(args.class_sizes)))
     env = ToyOCMDPEnv(config)
     model = MeanFieldModel(config)
     n_drugs = int(env.action_space.n)
@@ -74,9 +81,9 @@ def main() -> int:
         "spread_share_of_gain_over_uniform": spread / gain,
     }
     path = args.out / f"planner_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
 
-    print(f"{n_drugs} drugs, {args.mechanisms} mechanisms; {args.steps} steps, {args.random_starts} random starts")
+    print(f"{n_drugs} drugs, {env.coupling.n_mechanisms} mechanisms; {args.steps} steps, {args.random_starts} random starts")
     print(f"  uniform mixing            {uniform:.5f}")
     print(f"  best rotation             {rotation:.5f}")
     print(f"  plan, by planner seed     {' '.join(f'{r:.5f}' for r in rates)}")

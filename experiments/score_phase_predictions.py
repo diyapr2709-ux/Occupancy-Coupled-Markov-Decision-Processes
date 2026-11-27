@@ -23,8 +23,10 @@ the pairing of policies within a cell and of cells sharing an evaluation seed. E
 percentile interval against the margin (default log sqrt 2) gives the verdict: pass when
 its upper bound is below the margin, fail when its lower bound is above, otherwise
 inconclusive. With --null, the same is computed for theory-free predictions on the same
-resamples and the interval of E - E_null is reported. Direction checks compare log
-sigma_hat between two settings of one (delay, lam) line.
+resamples and the interval of E - E_null is reported, with verdict_vs_null: pass when that
+interval lies below 0, fail when its lower bound is at or above 0 (a tie with the null is a
+fail), otherwise inconclusive; the null must predict the same contrast and sign. Direction
+checks compare log sigma_hat between two settings of one (delay, lam) line.
 
 Predictions file (JSON):
   {"contrast": "<name>", "sign_beyond_crossing": 1 | -1,
@@ -55,7 +57,9 @@ def measured_lines(reports: list[dict], contrast: str) -> tuple[dict[Line, tuple
     minuend, subtrahend = CONTRASTS[contrast]
     points: dict[Line, dict[float, np.ndarray]] = {}
     episodes = None
-    seeds = {json.dumps(report.get("evaluation_episode_seeds")) for report in reports}
+    if any(not report.get("evaluation_episode_seeds") for report in reports):
+        raise ValueError("every report must record its evaluation episodes (evaluation_episode_seeds missing)")
+    seeds = {json.dumps(report["evaluation_episode_seeds"]) for report in reports}
     if len(seeds) > 1:
         raise ValueError("every report must use the same evaluation episodes (evaluation_episode_seeds differ)")
     for report in reports:
@@ -187,6 +191,9 @@ def score(lines: dict, episodes: int, predictions: dict, null: dict | None, dire
         diff = np.asarray(boot_e) - np.asarray(boot_null)
         out["E_null"] = median_error(lines, point, null, beyond)
         out["E_minus_E_null_ci95"] = _percentiles(diff, [2.5, 97.5])
+        d_lo, d_hi = out["E_minus_E_null_ci95"]
+        # the predictions beat the null only if the whole interval of E - E_null lies below 0; a tie (lower bound 0) fails
+        out["verdict_vs_null"] = "pass" if d_hi < 0 else "fail" if d_lo >= 0 else "inconclusive"
     out["directions"] = []
     for d_index, direction in enumerate(directions):
         for key, value in _direction_shifts(lines, point, direction, beyond).items():
@@ -230,7 +237,11 @@ def main() -> int:
         contrast = json.loads(args.predictions.read_text(encoding="utf-8"))["contrast"]
         lines, episodes = measured_lines(reports, contrast)
         _, beyond, predictions, directions = load_predictions(args.predictions, lines)
-        null = load_predictions(args.null, lines)[2] if args.null else None
+        null = None
+        if args.null:
+            null_contrast, null_beyond, null, _ = load_predictions(args.null, lines)
+            if (null_contrast, null_beyond) != (contrast, beyond):
+                raise ValueError(f"--null predicts {null_contrast!r} with sign {null_beyond}, not {contrast!r} with sign {beyond}")
     except (KeyError, ValueError) as exc:
         parser.error(str(exc))
     result = score(lines, episodes, predictions, null, directions, beyond, args.margin, args.resamples, args.seed)

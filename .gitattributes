@@ -1,0 +1,8 @@
+# Checked-out files carry their committed bytes on every platform, so a file's SHA-256 on disk
+# matches its blob and the hashes recorded in reports and decisions/ hold on Windows too.
+* text=auto eol=lf
+*.pt binary
+# Stored with CRLF line endings; kept byte for byte.
+figures/phase_20261123_190013_15752_feedback_over_rotation.csv -text
+figures/phase_20261123_190013_15752_greedy_over_rotation.csv -text
+figures/phase_20261123_190013_15752_value_of_feedback.csv -text
