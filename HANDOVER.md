@@ -17,7 +17,7 @@ git pull                     # the owner's merge commit; HEAD must contain this 
 git status --short -- ocmdp experiments pyproject.toml seeds.yaml preregistrations   # must be empty: these are what the launch checks call dirty
 # runs/ledger.txt gains a line every time the hook sees a launch command (even --help), and runs/phase gains the reports;
 # those are expected to show in git status and do not block a launch
-.venv/Scripts/python -m pytest -q          # 387 passed on the owner's machine
+.venv/Scripts/python -m pytest -q          # 390 passed on the owner's machine
 .venv/Scripts/python experiments/claim_a_gate.py pins --prereg preregistrations/2026-11-27-claim-a-boundary-kappa-2.yaml
 .venv/Scripts/python experiments/claim_a_gate.py pins --prereg preregistrations/2026-11-27-claim-a-boundary-delta-2.yaml
 ```
@@ -63,7 +63,7 @@ About 243.75 minutes at W = 20 (derived). One guarded launch at a time: wait for
 bash tools/rtx_guard.sh launch W -- .venv/Scripts/python experiments/sweep_phase_diagram.py --tier test --platform rtx-1 --prereg preregistrations/2026-11-27-claim-a-boundary-delta-2.yaml --delays 0 1 2 4 8 --lams 0.0 0.5 0.8 0.95 --sigmas 0.0 0.1 0.2 0.4 --class-sizes 2 2 --horizon 40 --delta 0.1 --episodes 100 --workers W --backend local --out runs/phase
 ```
 
-About 243.75 minutes at W = 20 (derived). Steps 4 to 6 take about 9 h 45 in all at W = 20. The preregistration's own calendar (run 1 by about 20:00 on 28 November, for a report before the morning of 29 November) is tightened by the owner's push deadline below: **Everything must be pushed to GitHub by the night of 28 November** (section 13), so run 1 starts as early as possible on 28 November and no later than about 10:00 host time; starting it on the evening of 27 November, as soon as the owner's commit and the two approval files are pulled, is better.
+About 243.75 minutes at W = 20 (derived). Steps 4 to 6 take about 9 h 45 in all at W = 20. The preregistration's calendar (the last report before 09:00 host time on 29 November; run 1 by about 10:00 on 28 November, or the evening of 27 November) follows from the owner's push deadline below: **Everything must be pushed to GitHub by the night of 28 November** (section 13), so run 1 starts as early as possible on 28 November and no later than about 10:00 host time; starting it on the evening of 27 November, as soon as the owner's commit and the two approval files are pulled, is better.
 
 If the host reboots or a launch is LOST (`bash tools/rtx_guard.sh status`), apply the rule already recorded on 26 November (`tools/rtx_guard.known_dead` is the owner's file; do not edit it): check for a live process or a report first; relaunch only with the identical command; record it. A relaunch of a **test-tier** launch is refused by the one-launch rule and is a stop for the owner.
 
@@ -73,7 +73,7 @@ If the host reboots or a launch is LOST (`bash tools/rtx_guard.sh status`), appl
 .venv/Scripts/python experiments/claim_a_gate.py score runs/phase/<kappa report>.json runs/phase/<delta report>.json --prereg preregistrations/2026-11-27-claim-a-boundary-kappa-2.yaml
 ```
 
-It checks the inputs against the pins and the two reports against the preregistration (test tier, launched under the committed file naming their setting, 480 results, 100 episodes, every value finite; the reports are matched to the settings by their recorded instance, so their order does not matter), writes `runs/claim_a/2026-11-27-claim-a-boundary-kappa-2/` (the filtered predictions, the null, `primary.json`, `secondary.json`) and ends with one line: `verdict_vs_null`, the interval of E − E_null, E with its interval, E_null, and `not_predicted` (must be 0). If it prints `NOT COMPLETED` there is no verdict, and the preregistered `sentence_not_completed` is the only sentence; a report written after 09:00 host time on 29 November counts as missing. Run it once more with `--prereg ...-delta.yaml`; it must print the same verdict. Commit nothing; the owner commits `runs/claim_a/` and the two reports.
+It checks the inputs against the pins and the two reports against the preregistration (test tier, launched under the committed file naming their setting, 480 results, 100 episodes, every value finite; the reports are matched to the settings by their recorded instance, so their order does not matter), writes `runs/claim_a/2026-11-27-claim-a-boundary-kappa-2/` (the filtered predictions, the null, `primary.json`, `secondary.json`) and ends with one line: `verdict_vs_null`, the interval of E − E_null, E with its interval, E_null, and `not_predicted` (must be 0). If it prints `NOT COMPLETED` there is no verdict, and the preregistered `sentence_not_completed` is the only sentence; a report written after 09:00 host time on 29 November counts as missing. Run it once more with `--prereg ...-delta-2.yaml`; it must print the same verdict. Commit nothing; the owner commits `runs/claim_a/` and the two reports.
 
 Then the descriptive quantities the preregistration lists beside the verdict, once per slug:
 
