@@ -208,18 +208,23 @@ def test_episode_count_follows_the_largest_spread_within_the_floor_and_cap():
         count.episode_count(_dev_map(zero_line=True))
 
 
-def test_gate_pins_recompute_from_the_committed_files():
+def test_gate_pins_recompute_from_the_files_the_preregistrations_name():
     gate = _module("claim_a_gate")
-    for name in ("kappa", "delta"):
+    for name in ("kappa-2", "delta-2"):
         prereg = ROOT / "preregistrations" / f"2026-11-27-claim-a-boundary-{name}.yaml"
         pins = gate.read_pins(prereg)
         computed = gate.computed_pins(ROOT / pins["dev_map"], ROOT / pins["heldout_settings"], ROOT / pins["predictions"], int(pins["sign_beyond_crossing"]))
         assert {k: pins[k] for k in computed} == computed, name
+        code = gate.read_code_pins(prereg)
+        assert {path: gate.file_hash(ROOT / path) for path in code} == code, name  # every pinned script is the one on disk
+    kappa, delta = (gate.read_pins(ROOT / "preregistrations" / f"2026-11-27-claim-a-boundary-{n}-2.yaml") for n in ("kappa", "delta"))
+    assert {k: v for k, v in kappa.items() if k != "setting"} == {k: v for k, v in delta.items() if k != "setting"}  # one rule, two launches
+    assert (kappa["setting"], delta["setting"]) == ("0.2/0.05", "0.1/0.1")
 
 
 def test_gate_refuses_a_preregistration_with_a_missing_or_doubled_pin(tmp_path):
     gate = _module("claim_a_gate")
-    text = (ROOT / "preregistrations" / "2026-11-27-claim-a-boundary-kappa.yaml").read_text(encoding="utf-8")
+    text = (ROOT / "preregistrations" / "2026-11-27-claim-a-boundary-kappa-2.yaml").read_text(encoding="utf-8")
     broken = tmp_path / "x.yaml"
     broken.write_text(text.replace("\nseed: 0\n", "\n"), encoding="utf-8")
     with pytest.raises(ValueError, match="lacks the pins"):
@@ -248,3 +253,61 @@ def test_scorer_verdict_against_the_null_fails_the_null_itself_and_refuses_a_mis
     done = subprocess.run([sys.executable, str(EXPERIMENTS / "score_phase_predictions.py"), str(theory), str(rep), "--null", str(other), "--resamples", "20"],
                           capture_output=True, text=True, cwd=ROOT)  # fmt: skip
     assert done.returncode == 2 and "--null predicts" in done.stderr
+
+
+def test_gate_reproduces_the_rerun_bitwise_but_refuses_it_as_run_one(capsys):
+    gate = _module("claim_a_gate")
+    args = type("A", (), {"run1": ROOT / "runs/phase/phase_20261126_213058_19724.json",
+                          "prereg": ROOT / "preregistrations/2026-11-27-claim-a-boundary-kappa-2.yaml"})()
+    assert gate.cmd_after_run1(args) == 1  # the 26 November rerun predates the preregistration, so it cannot be run 1
+    out = capsys.readouterr().out
+    assert "PASS: run 1 against the pinned map: PASS: 480 results, 96000 values compared, 0 mismatched" in out  # the comparator's suffix is allowed
+    assert "PASS: null_sha256 rebuilt from run 1" in out and "PASS: episodes recomputed on run 1" in out
+    assert "FAIL: run 1's commit holds this preregistration byte for byte" in out and "GATE FAIL" in out
+
+
+def test_gate_refuses_held_out_reports_that_are_not_the_preregistered_ones():
+    gate = _module("claim_a_gate")
+    pins = gate.read_pins(ROOT / "preregistrations/2026-11-27-claim-a-boundary-kappa-2.yaml")
+    report = _held_out_pair(episodes=100)[0]
+    report["args"]["prereg"] = "preregistrations/2026-11-27-claim-a-boundary-kappa-2.yaml"
+    problems = gate.check_held_out_report(report, ROOT / "x.json", pins)
+    assert any("results, not 480" not in p for p in problems) and any("committed preregistration" in p or "prereg_sha256" in p for p in problems)
+    report["args"]["tier"] = "dev"
+    assert "not a test-tier report" in gate.check_held_out_report(report, ROOT / "x.json", pins)
+    report["results"][0]["expected_failure_rate"][0] = float("nan")
+    assert "a missing or non-finite value" in gate.check_held_out_report(report, ROOT / "x.json", pins)
+
+
+def _held_out_pair(episodes=12):
+    """Two synthetic held-out reports on shared episodes: lines cross at 0.15 (kappa 0.2) and never (delta 0.1)."""
+    reports = []
+    for kappa, delta, crossing_at in ((0.2, 0.05, 0.15), (0.1, 0.1, None)):
+        results = []
+        for d in (0, 1, 2, 4, 8):
+            for lam in (0.0, 0.5, 0.8, 0.95):
+                for s in (0.0, 0.1, 0.2, 0.4):
+                    offset = (s - crossing_at) if crossing_at is not None else -0.05
+                    noise = [0.002 * ((e % 3) - 1) for e in range(episodes)]
+                    results.append({"delay": d, "lam": lam, "sigma": s, "policy": "greedy", "expected_failure_rate": [0.4] * episodes})
+                    results.append({"delay": d, "lam": lam, "sigma": s, "policy": "planned-once", "expected_failure_rate": [0.4 + offset + n for n in noise]})
+        reports.append({"args": {"tier": "test"}, "instance": {"kappa": kappa, "delta": delta, "horizon_quarters": 40},
+                        "evaluation_episode_seeds": list(range(11_000, 11_000 + episodes)), "results": results})  # fmt: skip
+    return reports
+
+
+def test_descriptives_count_censoring_sides_and_bracket_deltas(tmp_path):
+    desc, filt, null_mod = _module("claim_a_descriptives"), _module("claim_a_filter_predictions"), _module("null_phase_predictions")
+    reports = _held_out_pair()
+    settings = null_mod.load_settings(EXPERIMENTS / "claim_a_heldout_settings.json")
+    rows = [{**s, "delay": d, "lam": lam, "sigma_star": 0.15, "sign_at_max_sigma": 1} for s in settings for d in (0, 1, 2, 4, 8) for lam in (0.0, 0.5, 0.8, 0.95)]
+    theory = filt.filter_predictions({"contrast": "planned_once_minus_greedy", "sign_beyond_crossing": 1, "lines": rows}, settings)
+    null = {"contrast": "planned_once_minus_greedy", "sign_beyond_crossing": 1,
+            "lines": [{**r, "sigma_star": None, "sign_at_max_sigma": -1} for r in rows]}  # the null says: never crosses
+    out = desc.describe(reports, theory, null, 1, None)
+    assert out["censoring"]["counts"]["measured"] == {"below": 0, "inside": 20, "above": 20}
+    assert out["censoring"]["counts"]["theory"] == {"below": 0, "inside": 40, "above": 0}
+    assert out["censoring"]["counts"]["null"] == {"below": 0, "inside": 0, "above": 40}
+    assert out["censoring"]["lines_with_zero_error_by_same_side_censoring"] == {"theory": 0, "null": 20}
+    assert out["delta"]["lines_with_interior_crossing"] == 20 and out["delta"]["delta_min"] == pytest.approx(0.1, abs=1e-9)
+    assert len(out["cells"]) == 160 and all(c["half_width_95"] >= 0 for c in out["cells"])
