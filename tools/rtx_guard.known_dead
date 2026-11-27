@@ -1,0 +1,6 @@
+phase_20261126_190606_33244 exit code 1 at 19:35 on 2026-11-26, "OSError: [WinError 1455] The paging file is too small for this operation to complete"; host rebooted at 20:23 (decisions/2026-11-26.md, "Correction: the 18:40 phase sweep was running, and the relaunch failed")
+train_20261126_021648_42140 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (decisions/2026-11-26.md, "Step-1 launches: host crash and relaunch")
+train_20261126_021649_22720 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
+train_20261126_021650_37572 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
+train_20261126_021651_18688 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
+train_20261126_021651_25988 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
