@@ -4,3 +4,4 @@ train_20261126_021649_22720 killed in the host crash before 05:17 on 2026-11-26;
 train_20261126_021650_37572 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
 train_20261126_021651_18688 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
 train_20261126_021651_25988 killed in the host crash before 05:17 on 2026-11-26; relaunched at 05:25 (same entry)
+phase_20261127_184511_28144 LOST at 19:06:50 on 2026-11-27: guard shell ended on an interrupt by about 18:45:50; output.log last written 19:02:44, a KeyboardInterrupt traceback; no exit file, no report, no live sweep process (decisions/2026-11-27.md, "STOP: the kappa launch is LOST")

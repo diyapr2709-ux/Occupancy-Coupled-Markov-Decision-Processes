@@ -1,0 +1,323 @@
+# Preregistration: Claim A, the blind phase boundary of planned_once_minus_greedy at the held-out setting kappa 0.2
+#
+# One of two files that together make Claim A's test. This file licenses one test-tier
+# launch: the held-out setting with kappa doubled. Its twin,
+# preregistrations/2026-11-27-claim-a-boundary-delta-3.yaml, licenses the launch with delta
+# doubled. The decision rule is one test on the two reports together and is stated
+# identically in both files; the verdict is computed once, after both reports exist, by
+# `experiments/claim_a_gate.py score`. Neither file is amended after it is committed: a
+# changed rule means a new dated file.
+#
+# This pair supersedes 2026-11-27-claim-a-boundary-kappa-2.yaml and -delta-2.yaml, which
+# were committed the same day and stay as the record. Only one launch was made under them:
+# kappa 0.2 under -kappa-2, with launch record
+# runs/phase/launches/phase_20261127_184511_28144.json. That launch was LOST, and no report
+# was written.
+# - Its guard's shell ended between about 18:45:15 and 18:45:50, within about 40 s of the
+#   launch at 18:45:10. The terminal window reported that the shell ended on an interrupt
+#   signal.
+# - Its sweep ended at 19:02:44 with a KeyboardInterrupt.
+# - The source of both interrupts is not established.
+# No held-out value was written or seen (decisions/2026-11-27.md). The -kappa-2 slug is
+# spent; -delta-2 is not launched. The owner decided to rerun the test under this pair.
+# What changed:
+# - the slugs and the approval files;
+# - every guarded launch runs in its own hidden console, with no window or keyboard, not as
+#   a descendant of the Claude session (run_order step 0);
+# - run 1 is rerun at this pair's commit, as the gate requires;
+# - the calendar notes.
+# Unchanged from the -2 pair: the decision rule, the null, the filter, the episode rule, n,
+# every pinned value and every pinned script.
+
+slug: 2026-11-27-claim-a-boundary-kappa-3
+supersedes: 2026-11-27-claim-a-boundary-kappa-2.yaml
+written: 2026-11-27
+claim: A
+rung: planner-only; no learned agent is trained or evaluated
+
+hypothesis: >
+  On the 40 held-out (delay, lam) lines, 20 at kappa 0.2 and 20 at delta 0.1, the stage-2
+  blind derivation places the resistance-noise level sigma at which the contrast
+  planned_once_minus_greedy becomes positive for good closer to the measured crossing than
+  the theory-free null does, where the null carries each dev line's measured crossing to
+  the held-out settings unchanged: the 95% percentile bootstrap interval of E - E_null lies
+  entirely below 0.
+
+# ---------------------------------------------------------------- primary decision rule
+primary_quantity: >
+  D = E - E_null. E is the median over the 40 held-out lines of |log(sigma_hat / sigma_pred)|
+  for the stage-2 predictions; E_null is the same median for the theory-free null; both are
+  computed by experiments/score_phase_predictions.py on the same joint episode resamples,
+  with measured and predicted crossings censored to [0.1, 0.4] as that script documents.
+primary_test: the 95% percentile interval of D, the scorer's field E_minus_E_null_ci95
+primary_margin: 0
+resamples: 10000
+seed: 0
+verdict_pass: the upper bound of the interval is below 0
+verdict_fail: the lower bound of the interval is at or above 0 (a tie with the null, lower bound exactly 0, is a fail)
+verdict_inconclusive: the lower bound is below 0 and the upper bound is at or above 0
+sentence_pass: >
+  "On these 40 held-out lines, with episodes resampled and lines fixed, the blind theory's
+  median log-ratio error in placing the sign change of planned_once_minus_greedy was below
+  that of the theory-free null fitted on the 40-episode dev map: E - E_null 95% bootstrap
+  interval [a, b], entirely below 0."
+sentence_fail: >
+  "On these 40 held-out lines the blind theory did not place the boundary better than
+  carrying the dev map's crossings over: E - E_null 95% interval [a, b], lower bound at or
+  above 0."
+sentence_inconclusive: >
+  "On these 40 held-out lines the test was inconclusive at n = 100 episodes per cell: E -
+  E_null 95% interval [a, b] contains 0; the resolution on D was 0.707 SD* / Delta_min = r."
+sentence_not_completed: >
+  "The test did not complete." Stated, with no verdict, when `claim_a_gate.py score` prints
+  NOT COMPLETED: a report missing, a report not of the test tier or not launched under the
+  committed preregistration naming its setting, fewer than 480 results or 100 episodes, any
+  non-finite report value, or a non-finite E, E_null or interval bound. A report written
+  after 09:00 host time on 29 November counts as missing. The one exception is a line the
+  predictions leave out, which makes E infinite and the verdict fail (severity below).
+inference_scope: >
+  The bootstrap resamples episodes, not lines, so every sentence holds for these 40 lines at
+  these two settings and claims nothing about other lines or settings.
+severity: >
+  The null scored as if it were the theory gives D identically 0 on every resample, so the
+  rule classes it as fail whatever the data. A theory that leaves out 20 or more of the 40
+  lines has E infinite (score_phase_predictions.py gives an unpredicted line infinite error)
+  and fails.
+
+# ---------------------------------------------------------------- equivalence margin
+equivalence_margin: >
+  None on the primary rule: its margin is 0, and a null primary result is stated as "not
+  better than the theory-free null", never as equivalence of theory and null. The scorer's
+  margin log sqrt 2 = 0.34657 on E is kept for the secondary, descriptive clause "median
+  error within the margin", which carries no verdict and is reported only beside E_null's
+  own verdict against that margin (secondary_quantities).
+
+# ---------------------------------------------------------------- episodes and power
+episodes: 100
+episode_rule: >
+  n is the smallest count in [40, 100] with t_{0.975, n-1} SD* / sqrt(n) <= 0.005, where SD*
+  is the largest sample standard deviation over the dev map's 80 cells of the per-episode
+  contrast planned_once_minus_greedy (zero-spread cells cannot raise it), and 0.005 is half
+  the margin m = 0.01 that arena/2026-11-24-design-outcome.md committed; if no count up to
+  100 meets it, n is 100. Computed by experiments/claim_a_episode_count.py, which prints n
+  and nothing else; the cap binds, so n = 100, and tau, borrowed from the learned-agent
+  margin, has no effect on n. The floor of 40 keeps the test at least as
+  precise as the map the null is built from; the cap comes from the ten-hour budget at
+  twenty workers on the claim platform.
+episode_seeds: >
+  the first 100 evaluation episodes of the test tier of seeds.yaml, eval_seed(1000 + e) for
+  e in 0..99, shared by every policy and every cell of both held-out reports; no training
+  seed is used because no agent is trained. These are the same 100 episodes the lost
+  -kappa-2 launch was started on. It wrote no value, and none was seen. The sweep always
+  takes the first n test-tier episodes, so using other episodes would need a change to a
+  pinned script. The owner confirms the reuse by committing this file.
+  The case for the reuse:
+  - The sweep prints values only after writing its report (sweep_phase_diagram.py:223-231).
+    No report exists, and the lost launch's output.log, read whole, is a 22-line traceback.
+  - The sweep is deterministic given its episode seeds (run 1 reproduced the pinned map
+    bitwise), so a rerun on the same episodes draws nothing new to choose between.
+  - For training launches, the project's own rule forbids reusing test seeds across
+    test-tier launches (experiments/train_agent.py, check_test_seeds). The sweep does not
+    enforce it. This file departs from its spirit, with the owner's leave, for the reason
+    above.
+  - The lost attempt is disclosed wherever the result is cited, beside the stage-2
+    episode-count disclosure.
+detectable_effect: >
+  At n = 100 the 95% half-width on a cell's mean contrast is 0.1984 SD (exact Student-t, 99
+  degrees of freedom), where SD is that cell's paired SD; the cap binds, so this half-width
+  is above tau = 0.005 at the dev map's largest cell SD*, and tau is not reached. By the
+  delta method with correlation at most 1, a line's log crossing has half-width at most the
+  cell half-width divided by Delta, the change of the mean contrast across the grid interval
+  that brackets its crossing; E is 1-Lipschitz in the sup norm over the 40 lines' log
+  crossings, and each bracket has two ends, so with the simultaneous Student-t factor 1.78
+  over the 80 bracket cells (t at 1 - 0.025/80 over t at 0.975, 99 degrees of freedom) E
+  resolves at most 0.353 SD* / Delta_min and D at most 0.707 SD* / Delta_min, under
+  assumption A1. SD* is a dev-map spread and Delta_min a
+  held-out mean; neither is read before the test, and both are reported with the result, so
+  the resolution the test achieved is stated in log-ratio units beside the verdict. Under
+  the assumptions below.
+assumptions: >
+  A1: no held-out cell's paired SD exceeds the dev map's SD* (the fraction of held-out cells
+  with SD above SD*, a spread, is reported). A2: no grid cell other than the two ends of a
+  crossing bracket has a mean within one half-width of 0. Both are stated as assumptions,
+  not checked before the test.
+rho_assumed: >
+  Not a between-agent paired design: the pairing is of policies within a cell on shared
+  episodes, and the bootstrap carries that dependence without assuming a correlation. The
+  delta-method bound above takes correlation at most 1, the worst case.
+
+# ---------------------------------------------------------------- instance grid
+instance_grid: >
+  One instance family at two held-out settings, each 80 cells: K = 4 drugs, M = 2
+  mechanisms, class sizes [2, 2], imbalance KL = 0 nats; horizon 40 quarters; delays
+  {0, 1, 2, 4, 8}; lams {0.0, 0.5, 0.8, 0.95}; sigmas {0.0, 0.1, 0.2, 0.4}. This file: kappa
+  0.2, delta 0.05 (the dev map's kappa doubled). Its twin: kappa 0.1, delta 0.1 (the dev
+  map's delta doubled). Both from experiments/claim_a_heldout_settings.json, fixed on
+  2026-11-26 before the derivation started.
+setting: 0.2/0.05
+entropy_target_rule: not applicable; no entropy-regularised agent takes part (planner and heuristics only)
+entropy_constant_c: not applicable
+
+# ---------------------------------------------------------------- exclusions
+floor_exclusion: none; no line, cell or episode is excluded
+ceiling_exclusion: none
+censoring: >
+  Measured and predicted crossings are censored to [0.1, 0.4] by the scorer as it is: a line
+  positive at every positive sigma crosses "below" (placed at 0.1), one not positive at the
+  largest sigma crosses "above" (placed at 0.4), and two crossings censored on the same side
+  agree. The counts of lines censored below, inside and above are reported for the measured,
+  theory and null crossings, as is the number of lines whose error is 0 only because both
+  sides are censored alike (21 or more of 40 makes the median 0 by construction, and that is
+  then stated).
+zero_contrast_lines: >
+  A line whose contrast mean is exactly 0 at every sigma would give the null a line with no
+  sign, which the scorer refuses. experiments/claim_a_episode_count.py refuses such a dev
+  map; it accepted the pinned map. Held-out zero-width series are kept, scored as the scorer
+  defines, and counted.
+multiplicity: >
+  One primary test on one scalar; no correction. The 40 per-line errors, the 160 cell
+  intervals and any direction row are labelled "95% marginal, unadjusted, descriptive".
+shared_episodes: >
+  Every cell of both reports uses the same 100 test episodes. The bootstrap resamples
+  episodes jointly, so the replication unit is 100 episodes, not 40 independent lines, and
+  the paper says so in those words.
+
+# ---------------------------------------------------------------- metrics
+primary_metric: D = E - E_null with its 95% percentile interval and verdict_vs_null (score_phase_predictions.py)
+secondary_quantities: >
+  E, E_ci95 and the scorer's verdict against log sqrt 2 (worded only as "median error E = x,
+  95% interval [lo, hi], against the margin log sqrt 2"); E_null and the null scored as if it
+  were the theory (its own E and verdict against the margin: if the null also "passes" the
+  margin, the margin sentence is stated to carry no predictive content); E per held-out
+  setting, each from its own report and the null restricted to that setting; the censoring
+  counts above; the 160 cell intervals (exact Student-t); the achieved held-out Delta_min and
+  the fraction of cells with SD above SD*. Direction checks are not scored: the one
+  direction the derivation predicts starts at the dev setting, which the test does not
+  measure. Only the point values sigma_star and sign_at_max_sigma of the predictions file
+  are scored; no line is excluded, reweighted or excused by any other column of the
+  derivation's deliverable. The derivation's stage2.md assumed 20 evaluation episodes where
+  the dev map used 40 and this test uses 100; that is disclosed wherever the result is cited.
+  The censoring counts, the cell intervals, Delta_min and the spread-transfer share are
+  computed by experiments/claim_a_descriptives.py from the scored files, after the verdict.
+  If the primary verdict is fail or inconclusive, nothing secondary, per-setting or
+  exploratory is worded as the theory against the null or as agreement with the derivation's
+  predicted direction; such quantities are then described, not interpreted.
+
+# ---------------------------------------------------------------- pinned inputs
+dev_map: runs/phase/phase_20261126_184038_27744.json
+dev_map_sha256: 0389151cc481ed8defa42d3c5b8f75fb8c73cf537d8d748c4da47c567f9acf79
+dev_map_note: >
+  the 26 November rtx-1 dev map, clean commit d847dc5, reproduced bitwise by
+  runs/phase/phase_20261126_213058_19724.json (SHA-256
+  cb61b754e133c6e0e8969364cc1d30e83f0949c58fb8720c242a9de491faa478); rtx-1 is matched by
+  label only, because report schema 2 has no platform fingerprint; the 23 November Modal map
+  is kept and reported and is compared with nothing before the deadline.
+heldout_settings: experiments/claim_a_heldout_settings.json
+heldout_settings_sha256: 02bcf479e171f48466a209fa1b8f47cd23cffd80f617ab05a0ab6b1376ce9702
+predictions: predictions/claim-a-2026-11-26/stage2/predictions.json
+predictions_sha256: 7ea472fd8d6492ffef68ad5d59989aec16f507081af6005692fb37d369ad1af4
+predictions_note: >
+  delivered and hashed on 2026-11-26 before any held-out run (stage2.md SHA-256
+  7257617d9b166e5077a555461e94333d53204be280c0727c5f5c55cfe79f0b83); it carries 60 lines,
+  of which the 20 at the dev setting are not measured by this test and are dropped by
+  experiments/claim_a_filter_predictions.py, which changes no value.
+predictions_heldout_sha256: 2fb706ba44854edb6be83ad83930418afc29f6acc18634f8b9414dc4cc897c78
+sign_beyond_crossing: 1
+contrast: planned_once_minus_greedy
+null_sha256: 643884f227a899b9bbf81dfd3abec1526fcfa40db82d8476182889231327635d
+null_note: >
+  content hash (SHA-256 of json.dumps(..., indent=1, sort_keys=True) plus a newline) of
+  experiments/null_phase_predictions.py applied to the pinned dev map and the held-out
+  settings with the contrast and sign above; the null rebuilt from run 1 must have the same
+  hash.
+code_sha256: >
+  experiments/score_phase_predictions.py 53c2f6ca5d4ce115d09a984bcc6395f8f158df59fcce361abbafdbd86ae65624;
+  experiments/null_phase_predictions.py 6facc4c8a1a5722e9f002cb919269fbd7e91cfba0f8d76eaed36cf0ba18a0503;
+  experiments/claim_a_filter_predictions.py bfa463d32e5c2dac837446d3afb47c730e52c2014304f4fce9e76890b771c2a6;
+  experiments/claim_a_episode_count.py 1316feaacc782aa64f2bbe3600263b80457d90b5fd89187b46d29fb956d101c6;
+  experiments/claim_a_gate.py af2419a46d8ef99b97429030bace2155799a1ac90a3ac43ee317ec78aa186f59;
+  experiments/claim_a_descriptives.py cd4892f3dd43c5c168447859ba04e46525c56315b8fab0476542ba77addfcb54;
+  experiments/sweep_phase_diagram.py 5d964989fe715cc63ed30ea4a5bc22775e5c2fa093c1b826db41f497ac423bb8;
+  tools/compare_phase_reports.py a1ec31b1d1f823cca841d1f404bc2f73a523c4c7d75ac28b79fea7d6a1b2e35a;
+  tools/rtx_guard.sh 81472009378049c7728d13a08578105b01bf88fa9e02582e5e9a5d2bf1a55ccd;
+
+# ---------------------------------------------------------------- platform and launches
+platform: rtx-1
+workers: at most 20, the count tools/rtx_guard.sh check admits just before each launch, recorded in decisions/
+run_order: >
+  0. Every guarded launch below, run 1 included, is started from one Claude Bash call that
+     carries the launch command, so the tier hook sees it and records it. That call starts
+     Git's bash.exe through PowerShell `Start-Process -WindowStyle Hidden`, with the
+     repository as its working directory. The run then has its own hidden console, with no
+     window or keyboard, and is not a descendant of the Claude session. Nothing is launched
+     from an interactive terminal window. The wrapper is first tested with harmless commands
+     (decisions/2026-11-27.md).
+  1. Run 1, dev tier: the dev map rerun at this preregistration's commit, with the pinned
+     map's arguments and `--workers W`:
+     bash tools/rtx_guard.sh launch W -- .venv/Scripts/python experiments/sweep_phase_diagram.py
+     --tier dev --platform rtx-1 --delays 0 1 2 4 8 --lams 0.0 0.5 0.8 0.95 --sigmas 0.0 0.1
+     0.2 0.4 --class-sizes 2 2 --horizon 40 --episodes 40 --workers W --backend local --out
+     runs/phase
+  2. Gate: `.venv/Scripts/python experiments/claim_a_gate.py after-run1 runs/phase/<run 1
+     report>.json --prereg preregistrations/2026-11-27-claim-a-boundary-kappa-3.yaml` must
+     print GATE PASS after eight PASS lines: this file committed and unmodified; the pinned
+     map's hash; run 1 a dev-tier report from a clean commit whose tree holds this file byte
+     for byte; run 1 not the pinned map; run 1 reproducing the pinned map bitwise under
+     tools/compare_phase_reports.py, which skips only the launch arguments `out` and
+     `workers`; the null rebuilt from run 1 with null_sha256; the episode count recomputed on
+     run 1 equal to 100. Any FAIL is a stop for the owner; nothing launches. Nobody reads run
+     1's report or the guard's output.log (the sweep prints every cell's contrast mean there)
+     before the verdict; on a non-zero exit only lines matching Error or Traceback are read.
+  3. This launch, test tier, after the owner has committed this file and created
+     approvals/2026-11-27-claim-a-boundary-kappa-3.ok:
+     bash tools/rtx_guard.sh launch W -- .venv/Scripts/python experiments/sweep_phase_diagram.py
+     --tier test --platform rtx-1 --prereg preregistrations/2026-11-27-claim-a-boundary-kappa-3.yaml
+     --delays 0 1 2 4 8 --lams 0.0 0.5 0.8 0.95 --sigmas 0.0 0.1 0.2 0.4 --class-sizes 2 2
+     --horizon 40 --kappa 0.2 --episodes 100 --workers W --backend local --out runs/phase
+  4. The twin launch (delta 0.1) under its own file and approval, after this one has written
+     its report: one guarded launch at a time.
+  5. Scoring, once both reports exist:
+     .venv/Scripts/python experiments/claim_a_gate.py score runs/phase/<kappa report>.json
+     runs/phase/<delta report>.json --prereg preregistrations/2026-11-27-claim-a-boundary-kappa-3.yaml
+     It matches the reports to the settings by their recorded instance, refuses anything
+     that is not a complete, finite, test-tier report launched under the committed file
+     naming its setting, writes runs/claim_a/2026-11-27-claim-a-boundary-kappa-3/ and prints
+     the verdict or NOT COMPLETED. Then experiments/claim_a_descriptives.py on that folder
+     and the two reports, with --dev-map, writes descriptives.json. No number from either
+     enters a draft before the run-auditor and the adversarial-reviewer pass.
+time_budget: >
+  Derived from the 65-minute uncontended 80-cell, 40-episode rerun at 30 workers, nothing
+  measured at these sizes: run 1 about 97.5 min at 20 workers; each held-out sweep about
+  243.75 min at 20 workers (160/80 x 100/40 x 65 x 30/20 over two launches, 487.5 min for
+  both); about 9 h 45 in all, run one after the other. The ten-hour budget of the arena
+  criteria covers the two held-out launches: at W below 17 they alone exceed it, and that is
+  a stop for the owner with n unchanged. With run 1 counted, the whole exceeds ten hours at
+  any W of 19 or less, which is a calendar fact to plan around, not a stop. The last report
+  must be written before 09:00 host time on 29 November, after which it counts as missing;
+  the owner's push deadline (the night of 28 November) means run 1 starts by about 10:00 on
+  28 November, or on the evening of 27 November once this file and its approval are pulled.
+  Measured since:
+  - run 1 took 107.6 min at 17 workers (decisions/2026-11-27.md);
+  - in the lost -kappa-2 launch, process counters about 10 min in showed 3 of 19 workers
+    busy and the rest idle.
+  Inferred, not read from any output: a held-out launch is bound by its longest single
+  jobs. If those cost about what run 1's did at kappa 0.2 and delta 0.1 (unknown), each
+  held-out launch takes about 2.5 x 107.6 = 269 min at any admitted W of 17 or more. That
+  is derived, not measured: about 538 min for the two, plus about 108 min for run 1, about
+  10 h 46 in all. This supersedes the 9 h 45 total above. The W rules above are unchanged.
+one_launch: one test-tier launch under this file; a second is refused by the tier guard and by sweep_phase_diagram.py
+
+# ---------------------------------------------------------------- provenance
+git_commit_at_writing: >
+  HEAD e11aff3 (the commit of run 1's record under the -2 pair), this file uncommitted; the launches name the owner's commit that contains this
+  file, and the sweep, the gate and the scorer refuse a modified or uncommitted
+  preregistration.
+decided_by: >
+  arena/2026-11-27-claim-a-rule-outcome.md (proposal 2 adopted with the amendments listed
+  there), under the owner's instruction of 2026-11-26 that the arena decides; the decider
+  had read no dev-map value. The primary rule, the episode rule and the exclusions were
+  fixed before any run at the held-out settings and are unchanged from the first pair; the
+  changes of this pair are listed in its header and in decisions/2026-11-27.md. The owner
+  decided on the rerun under this pair on 2026-11-27 at about 19:20, after the -kappa-2
+  launch was lost. Nothing in the rule was chosen after a held-out value, since none was
+  written.
